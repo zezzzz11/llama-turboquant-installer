@@ -358,6 +358,17 @@ tune_for_model() {
             fi
         fi
     fi
+
+    # FlashAttention: big speed/memory win on Metal & CUDA at long context.
+    # Skipped on CPU/Vulkan/HIP where support is partial or slower.
+    case "$GPU_BACKEND" in
+        metal|cuda)
+            if [[ "${EXTRA_ARGS:-}" != *flash-attn* ]]; then
+                info "  Enabling --flash-attn ($GPU_BACKEND backend)"
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--flash-attn"
+            fi
+            ;;
+    esac
 }
 
 # ---------- HF API helpers ----------

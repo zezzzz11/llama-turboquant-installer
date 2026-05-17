@@ -84,6 +84,8 @@ KV bytes ≈ 2 × layers × kv_heads × head_dim × context × 2   # fp16
 
 If projected KV exceeds ~40 % of system RAM, the installer automatically appends `--cache-type-k q8_0 --cache-type-v q8_0` to the launcher (halves cache size with negligible quality loss).
 
+On Metal and CUDA backends, `--flash-attn` is also added automatically — large speed and memory gains at long context. Skipped on CPU / Vulkan / HIP where support is partial.
+
 Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
 
 ### Safety checks
