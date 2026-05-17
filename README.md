@@ -27,8 +27,8 @@ Non-interactive:
 
 ```bash
 ./install.sh --yes \
-    --use-case 2 \
-    --model bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
+    --use-case 4 \
+    --model Qwen/Qwen3-8B-GGUF \
     --port 8000 --context 16384
 ```
 
@@ -56,7 +56,7 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 ## Flags
 
 ```
---use-case {1|2|3}        1=chat, 2=code, 3=research
+--use-case {1|2|3|4}      1=chat, 2=code, 3=research, 4=agents/tools
 --model <hf-repo-id>      Hugging Face GGUF repo
 --port <int>              llama-server port (default 8000)
 --context <int>           context length, tokens
@@ -72,6 +72,18 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 
 The installer writes a config file you can edit later; rerunning with `--resume` picks it up.
 
+### Model recommendations
+
+The default path is now tuned for local agent runners and OpenAI-compatible clients such as Agent0-style loops, OpenClaw, Hermes, Pi, and OpenCode. The interactive wizard shows a hardware-aware catalog with small, medium, MoE, Hermes, and large agent-tuned options, including:
+
+- `Qwen/Qwen3-8B-GGUF` for a fast default local agent baseline.
+- `bartowski/NousResearch_Hermes-4-14B-GGUF` for Hermes-style reasoning and tool use.
+- `Qwen/Qwen3-14B-GGUF` and `Qwen/Qwen3-30B-A3B-GGUF` for stronger planning and coding.
+- `ggml-org/gemma-4-26B-A4B-it-GGUF` for a Gemma MoE option used in local-agent docs.
+- `bartowski/Athene-V2-Agent-GGUF` for high-memory agent workloads.
+
+You can still pass any GGUF repository explicitly with `--model owner/repo`.
+
 ### Context size and auto-tuning
 
 The floor is 65 536 tokens across all use cases — enough for modern agentic workloads. After download the installer reads the GGUF's native context length from the file's metadata header; if it's larger than your requested context, **the native value is used instead**. Qwen3.5 reports 256k, Llama 3.1 reports 128k, etc.
@@ -86,7 +98,7 @@ If projected KV exceeds ~40 % of system RAM, the installer automatically appends
 
 On Metal and CUDA backends, `--flash-attn` is also added automatically — large speed and memory gains at long context. Skipped on CPU / Vulkan / HIP where support is partial.
 
-`--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct models (Qwen, Llama 3.1+, etc.).
+`--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct and agent models (Qwen, Hermes, Gemma, Llama 3.1+, etc.).
 
 Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
 

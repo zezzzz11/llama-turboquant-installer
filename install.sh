@@ -205,7 +205,7 @@ ${C_BOLD}llama-turboquant-installer${C_RESET}
 ${C_BOLD}Usage:${C_RESET}  install.sh [options]
 
 ${C_BOLD}Options:${C_RESET}
-  --use-case {1|2|3}        1=chat, 2=code, 3=research
+  --use-case {1|2|3|4}      1=chat, 2=code, 3=research, 4=agents/tools
   --model <hf-repo-id>      Hugging Face GGUF repo
   --port <int>              llama-server port (default 8000)
   --context <int>           context length in tokens
@@ -222,8 +222,8 @@ ${C_BOLD}Options:${C_RESET}
 
 ${C_BOLD}Examples:${C_RESET}
   install.sh
-  install.sh --yes --use-case 2
-  install.sh --yes --model bartowski/Qwen2.5-7B-Instruct-GGUF --port 8001
+  install.sh --yes --use-case 4
+  install.sh --yes --model Qwen/Qwen3-8B-GGUF --port 8001
 USAGE
 }
 
@@ -293,6 +293,10 @@ detect_platform() {
         kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
         MEM_GB=$(( kb / 1024 / 1024 ))
         PHYS_CORES="$(nproc 2>/dev/null || echo 2)"
+    fi
+    if (( MEM_GB < 1 )); then
+        warn "Could not detect system RAM; assuming 16 GB for recommendations"
+        MEM_GB=16
     fi
 
     GPU_BACKEND="cpu"
@@ -870,24 +874,73 @@ fits_under() {
         'BEGIN { exit !(size < mem * mult) }'
 }
 
+MODEL_RECOMMENDATIONS=(
+    "Qwen/Qwen3-8B-GGUF|5.1|agents/code|Fast local baseline for Agent0-style loops, OpenClaw, Hermes, and coding"
+    "bartowski/NousResearch_Hermes-4-14B-GGUF|8.9|agents/reasoning|Hermes 4 reasoning and tool-use oriented model"
+    "Qwen/Qwen3-14B-GGUF|9.3|agents/reasoning|Stronger Qwen3 planner with good tool calling and code ability"
+    "ggml-org/gemma-4-26B-A4B-it-GGUF|16.8|agents/general|Gemma MoE option used in local-agent docs; 4B active experts"
+    "Qwen/Qwen3-30B-A3B-GGUF|18.6|agents/research|MoE agent model for stronger planning with moderate active params"
+    "mradermacher/AgentDoG-Qwen3-4B-GGUF|2.6|small/agents|Small agent-safety tuned Qwen3 variant for constrained machines"
+    "mradermacher/Qwen3-4B-Agent-Claude-Gemini-GGUF|2.6|small/agents|Small experimental agent finetune for low RAM"
+    "bartowski/Athene-V2-Agent-GGUF|47.4|large/agents|Large agent-tuned model for high-memory workstations"
+)
+
 show_recommendations() {
     info "${C_DIM}(reserving ~50% of RAM for KV cache + context shifts + OS)${C_RESET}"
-    local entries=(
-        "bartowski/Qwen2.5-7B-Instruct-GGUF:4.5"
-        "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:4.8"
-        "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:5.5"
-        "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF:40.0"
-    )
-    for entry in "${entries[@]}"; do
-        local name="${entry%%:*}" gb="${entry##*:}"
+    info "Agent-oriented recommendations for Agent0-style runners, OpenClaw, Hermes, Pi, and OpenAI-compatible clients:"
+    for entry in "${MODEL_RECOMMENDATIONS[@]}"; do
+        local name gb tags desc
+        IFS='|' read -r name gb tags desc <<< "$entry"
         if fits_under "$gb" 0.5; then
-            printf "  ${C_BGREEN}[OK]${C_RESET}    %-50s ${C_DIM}~%s GB — comfortable${C_RESET}\n" "$name" "$gb" >&2
+            printf "  ${C_BGREEN}[OK]${C_RESET}    %-48s ${C_DIM}~%s GB %-15s %s${C_RESET}\n" "$name" "$gb" "[$tags]" "$desc" >&2
         elif fits_under "$gb" 0.8; then
-            printf "  ${C_YELLOW}[TIGHT]${C_RESET} %-50s ${C_DIM}~%s GB — needs q8_0 KV / shorter ctx${C_RESET}\n" "$name" "$gb" >&2
+            printf "  ${C_YELLOW}[TIGHT]${C_RESET} %-48s ${C_DIM}~%s GB %-15s needs q8_0 KV / shorter ctx${C_RESET}\n" "$name" "$gb" "[$tags]" >&2
         else
-            printf "  ${C_RED}[BIG]${C_RESET}   %-50s ${C_DIM}~%s GB — too large for ${MEM_GB} GB${C_RESET}\n" "$name" "$gb" >&2
+            printf "  ${C_RED}[BIG]${C_RESET}   %-48s ${C_DIM}~%s GB %-15s too large for ${MEM_GB} GB${C_RESET}\n" "$name" "$gb" "[$tags]" >&2
         fi
     done
+}
+
+pick_agent_default() {
+    if (( MEM_GB >= 96 )); then
+        DEFAULT_MODEL="bartowski/Athene-V2-Agent-GGUF"
+    elif (( MEM_GB >= 48 )); then
+        DEFAULT_MODEL="Qwen/Qwen3-30B-A3B-GGUF"
+    elif (( MEM_GB >= 32 )); then
+        DEFAULT_MODEL="ggml-org/gemma-4-26B-A4B-it-GGUF"
+    elif (( MEM_GB >= 18 )); then
+        DEFAULT_MODEL="Qwen/Qwen3-14B-GGUF"
+    elif (( MEM_GB >= 10 )); then
+        DEFAULT_MODEL="Qwen/Qwen3-8B-GGUF"
+    else
+        DEFAULT_MODEL="mradermacher/AgentDoG-Qwen3-4B-GGUF"
+    fi
+}
+
+choose_model_from_catalog() {
+    local labels=()
+    local entry name gb tags desc
+    for entry in "${MODEL_RECOMMENDATIONS[@]}"; do
+        IFS='|' read -r name gb tags desc <<< "$entry"
+        labels+=( "$name (~${gb} GB, ${tags}) - ${desc}" )
+    done
+    labels+=( "Custom Hugging Face repo ID" )
+
+    local choice
+    choice=$(choose_menu "Model catalog" 1 "${labels[@]}")
+    if (( choice == ${#labels[@]} )); then
+        local custom=""
+        while [[ -z "$custom" ]]; do
+            custom="$(ask_string "Enter HuggingFace repo ID (owner/repo)")"
+            [[ -z "$custom" ]] && warn "Cannot be empty"
+        done
+        printf '%s\n' "$custom"
+        return 0
+    fi
+
+    entry="${MODEL_RECOMMENDATIONS[$(( choice - 1 ))]}"
+    IFS='|' read -r name gb tags desc <<< "$entry"
+    printf '%s\n' "$name"
 }
 
 # ════════════════════════════════════════════════════════════════════
@@ -904,6 +957,7 @@ default_for_use_case() {
             else
                 DEFAULT_MODEL="bartowski/Qwen2.5-7B-Instruct-GGUF"
             fi ;;
+        4) REC_CONTEXT=65536; pick_agent_default ;;
         *) error "Invalid use-case: $1" ;;
     esac
 }
@@ -948,15 +1002,16 @@ run_setup_wizard() {
     USE_CASE="${CLI_USE_CASE:-}"
     if [[ -z "$USE_CASE" ]]; then
         if [[ "$ASSUME_YES" -eq 1 ]]; then
-            USE_CASE=1
+            USE_CASE=4
         else
-            USE_CASE=$(choose_menu "Use case" 1 \
+            USE_CASE=$(choose_menu "Use case" 4 \
                 "General chat / assistant" \
                 "Programming / code assistance" \
-                "Research / long-context analysis")
+                "Research / long-context analysis" \
+                "Local agents / tool use (Agent0, OpenClaw, Hermes)")
         fi
     fi
-    [[ "$USE_CASE" =~ ^[1-3]$ ]] || error "Invalid --use-case: $USE_CASE"
+    [[ "$USE_CASE" =~ ^[1-4]$ ]] || error "Invalid --use-case: $USE_CASE"
     default_for_use_case "$USE_CASE"
 
     MODEL_ID="${CLI_MODEL:-}"
@@ -968,10 +1023,7 @@ run_setup_wizard() {
             if ask_yn "Accept this model?" "Y"; then
                 MODEL_ID="$DEFAULT_MODEL"
             else
-                while [[ -z "$MODEL_ID" ]]; do
-                    MODEL_ID="$(ask_string "Enter HuggingFace repo ID (owner/repo)")"
-                    [[ -z "$MODEL_ID" ]] && warn "Cannot be empty"
-                done
+                MODEL_ID="$(choose_model_from_catalog)"
             fi
         fi
     fi
