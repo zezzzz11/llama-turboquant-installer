@@ -369,6 +369,13 @@ tune_for_model() {
             fi
             ;;
     esac
+
+    # Jinja: use the model's built-in chat template from GGUF metadata.
+    # Near-mandatory for tool calling with modern instruct models.
+    if [[ "${EXTRA_ARGS:-}" != *--jinja* ]]; then
+        info "  Enabling --jinja (chat template from GGUF, needed for tool calls)"
+        EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--jinja"
+    fi
 }
 
 # ---------- HF API helpers ----------
