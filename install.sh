@@ -484,6 +484,34 @@ for k, v in out.items():
 ' "$file"
 }
 
+append_extra_arg_once() {
+    local marker="$1"; shift
+    [[ "${EXTRA_ARGS:-}" == *"$marker"* ]] && return 0
+    EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }$*"
+}
+
+server_supports_flag() {
+    local flag="$1"
+    [[ -n "${LLAMA_SERVER_PATH:-}" && -x "${LLAMA_SERVER_PATH:-}" ]] || return 1
+    "$LLAMA_SERVER_PATH" --help 2>&1 | grep -q -- "$flag"
+}
+
+enable_chat_tool_args() {
+    if [[ "${EXTRA_ARGS:-}" != *--jinja* ]]; then
+        ok "Enabling --jinja (chat template from GGUF, needed for tool calls)"
+        append_extra_arg_once "--jinja" "--jinja"
+    fi
+
+    [[ "${USE_CASE:-}" == "4" ]] || return 0
+    if server_supports_flag "--tool-call-parser" && server_supports_flag "--enable-auto-tool-choice"; then
+        append_extra_arg_once "--tool-call-parser" "--tool-call-parser hermes"
+        append_extra_arg_once "--enable-auto-tool-choice" "--enable-auto-tool-choice"
+        ok "Enabling Hermes tool parser and auto tool choice"
+    else
+        warn "This llama-server does not support --tool-call-parser / --enable-auto-tool-choice; skipping agent tool parser flags"
+    fi
+}
+
 tune_for_model() {
     local model_file="$1"
     [[ -f "$model_file" ]] || return 0
@@ -493,6 +521,7 @@ tune_for_model() {
     meta="$(gguf_metadata "$model_file" 2>/dev/null || true)"
     if [[ -z "$meta" ]]; then
         warn "Could not read GGUF metadata; skipping auto-tune"
+        enable_chat_tool_args
         return 0
     fi
 
@@ -544,10 +573,7 @@ tune_for_model() {
             ;;
     esac
 
-    if [[ "${EXTRA_ARGS:-}" != *--jinja* ]]; then
-        ok "Enabling --jinja (chat template from GGUF, needed for tool calls)"
-        EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--jinja"
-    fi
+    enable_chat_tool_args
 }
 
 # ════════════════════════════════════════════════════════════════════
