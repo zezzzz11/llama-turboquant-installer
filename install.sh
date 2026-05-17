@@ -460,7 +460,9 @@ download_model() {
         return 0
     fi
 
-    # Use the HF tree API for size pre-check, sha256, and (for the curl path) file pick.
+    # Use the HF tree API for size pre-check, sha256, and file pick.
+    # CRITICAL: without picking a specific file, huggingface-cli downloads the
+    # entire repo — bartowski's GGUF repos contain every quant level (50+ GB).
     local tree="" pick="" expected_sha="" expected_size=0
     tree="$(curl -sfL "https://huggingface.co/api/models/${model_id}/tree/main" 2>/dev/null || true)"
     if [[ -n "$tree" ]] && command -v python3 &>/dev/null; then
@@ -471,27 +473,30 @@ download_model() {
             check_disk_space "$dest" "${expected_size:-0}"
         fi
     fi
+    # Regex fallback if python3 isn't available
+    if [[ -z "$pick" && -n "$tree" ]]; then
+        pick="$(printf '%s' "$tree" \
+            | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]*\.gguf"' \
+            | sed -E 's/.*"([^"]+)"$/\1/' \
+            | { grep -m1 -i 'Q4_K_M' || head -n1; })"
+    fi
 
     if command -v huggingface-cli &>/dev/null; then
-        info "→ huggingface-cli (verifies LFS sha256 internally)"
+        local include_args=()
+        if [[ -n "$pick" ]]; then
+            include_args=(--include "$pick")
+            info "→ huggingface-cli download $pick"
+        else
+            warn "Could not identify a specific GGUF — downloading entire repo"
+        fi
         huggingface-cli download "$model_id" \
-            --local-dir "$dest" --resume-download >/dev/null \
+            --local-dir "$dest" --resume-download \
+            "${include_args[@]}" >/dev/null \
             || error "huggingface-cli download failed for $model_id"
     else
         info "→ HF API fallback"
-        if [[ -z "$tree" ]]; then
-            error "Cannot reach HF API for $model_id"
-        fi
-        if [[ -z "$pick" ]]; then
-            # Fall back to regex listing if python3 wasn't available
-            pick="$(printf '%s' "$tree" \
-                | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]*\.gguf"' \
-                | sed -E 's/.*"([^"]+)"$/\1/' \
-                | { grep -m1 -i 'Q4_K_M' || true; } \
-                | head -n1)"
-        fi
+        [[ -z "$tree" ]] && error "Cannot reach HF API for $model_id"
         [[ -z "$pick" ]] && error "No GGUF files in $model_id"
-
         info "Downloading $pick"
         curl -fL "https://huggingface.co/${model_id}/resolve/main/${pick}" \
             -o "${dest}/$(basename "$pick")" \
