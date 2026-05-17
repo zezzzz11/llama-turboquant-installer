@@ -647,44 +647,64 @@ download_model() {
     [[ -z "$pick" ]] && error "Could not identify a target GGUF in ${model_id}"
     info "Target file: ${C_BOLD}${pick}${C_RESET}"
 
-    if [[ -f "${dest}/${pick}" ]]; then
-        if [[ "$REDOWNLOAD" -eq 1 ]]; then
-            info "--redownload: removing existing ${pick}"
-            run rm -f "${dest}/${pick}"
-        elif [[ "$ASSUME_YES" -eq 1 ]]; then
-            ok "Model already present — reusing"
-            printf '%s\n' "${dest}/${pick}"
-            return 0
-        else
-            ok "Model file already present: $(du -h "${dest}/${pick}" | awk '{print $1}')"
-            if ask_yn "Reuse it and skip the download?" "Y"; then
-                printf '%s\n' "${dest}/${pick}"
-                return 0
+    local target_path="${dest}/${pick}"
+    local existing_size=0
+
+    if [[ -f "$target_path" ]]; then
+        existing_size="$(wc -c < "$target_path" | awk '{print $1}')"
+        if (( expected_size > 0 && existing_size < expected_size )); then
+            if [[ "$REDOWNLOAD" -eq 1 ]]; then
+                info "--redownload: removing partial ${pick}"
+                run rm -f "$target_path"
+            else
+                warn "Partial model found: $(( existing_size / 1024 / 1024 )) MB of ~$(( expected_size / 1024 / 1024 )) MB; resuming"
             fi
-            info "Re-downloading"
-            run rm -f "${dest}/${pick}"
+        elif (( expected_size > 0 && existing_size > expected_size )); then
+            warn "Existing model is larger than expected; re-downloading ${pick}"
+            run rm -f "$target_path"
+        else
+            if [[ "$REDOWNLOAD" -eq 1 ]]; then
+                info "--redownload: removing existing ${pick}"
+                run rm -f "$target_path"
+            elif [[ "$ASSUME_YES" -eq 1 ]]; then
+                ok "Model already present — reusing"
+                printf '%s\n' "$target_path"
+                return 0
+            else
+                ok "Model file already present: $(du -h "$target_path" | awk '{print $1}')"
+                if ask_yn "Reuse it and skip the download?" "Y"; then
+                    printf '%s\n' "$target_path"
+                    return 0
+                fi
+                info "Re-downloading"
+                run rm -f "$target_path"
+            fi
         fi
     fi
 
-    if command -v huggingface-cli &>/dev/null; then
-        info "Using huggingface-cli (filtering to ${pick})"
+    run mkdir -p "$(dirname "$target_path")"
+    info "Using curl with resume support"
+    if curl -fL -C - --progress-bar "https://huggingface.co/${model_id}/resolve/main/${pick}" \
+        -o "$target_path"; then
+        verify_sha256 "$target_path" "$expected_sha"
+    elif command -v huggingface-cli &>/dev/null; then
+        warn "curl download failed; falling back to huggingface-cli"
         huggingface-cli download "$model_id" \
-            --local-dir "$dest" --resume-download \
+            --local-dir "$dest" \
             --include "$pick" >/dev/null \
             || error "huggingface-cli download failed for ${model_id}"
     else
-        info "Using curl"
-        curl -fL --progress-bar "https://huggingface.co/${model_id}/resolve/main/${pick}" \
-            -o "${dest}/$(basename "$pick")" \
-            || error "Download failed for $pick"
-        verify_sha256 "${dest}/$(basename "$pick")" "$expected_sha"
+        error "Download failed for $pick"
     fi
 
-    local gguf
-    gguf="$(find "$dest" -name '*.gguf' -type f | head -n1 || true)"
-    [[ -z "$gguf" ]] && error "No GGUF file found in $dest after download"
-    ok "Downloaded: ${gguf}"
-    printf '%s\n' "$gguf"
+    [[ -f "$target_path" ]] || error "Expected downloaded GGUF not found: $target_path"
+    if (( expected_size > 0 )); then
+        local actual_size
+        actual_size="$(wc -c < "$target_path" | awk '{print $1}')"
+        [[ "$actual_size" == "$expected_size" ]] || error "Downloaded size mismatch for $pick: expected $expected_size bytes, got $actual_size"
+    fi
+    ok "Downloaded: ${target_path}"
+    printf '%s\n' "$target_path"
 }
 
 # ════════════════════════════════════════════════════════════════════
