@@ -101,7 +101,7 @@ If projected KV exceeds ~40 % of system RAM, the installer automatically appends
 
 On Metal and CUDA backends, `--flash-attn` is also added automatically — large speed and memory gains at long context. Skipped on CPU / Vulkan / HIP where support is partial.
 
-`--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct and agent models (Qwen, Hermes, Gemma, Llama 3.1+, etc.). For the agents/tools use case, the installer also enables `--tool-call-parser hermes --enable-auto-tool-choice` when the installed `llama-server` supports those flags.
+`--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct and agent models (Qwen, Hermes, Gemma, Llama 3.1+, etc.).
 
 Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
 
