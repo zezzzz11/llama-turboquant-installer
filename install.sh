@@ -222,6 +222,144 @@ ensure_hf_cli() {
         || warn "Could not install huggingface-cli; will use curl fallback."
 }
 
+# ---------- GGUF metadata ----------
+gguf_metadata() {
+    # Echo "key=value" lines for the metadata fields we care about.
+    # Requires python3; returns nonzero silently otherwise.
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    command -v python3 &>/dev/null || return 1
+    python3 -c '
+import struct, sys
+
+WANTED = {"general.architecture": "arch"}
+SUFFIXES = {
+    ".context_length":           "context_length",
+    ".block_count":              "block_count",
+    ".attention.head_count":     "head_count",
+    ".attention.head_count_kv":  "head_count_kv",
+    ".embedding_length":         "embedding_length",
+    ".attention.key_length":     "key_length",
+}
+SIZES = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:1, 10:8, 11:8, 12:8}
+
+def rs(f):
+    n = struct.unpack("<Q", f.read(8))[0]
+    return f.read(n).decode("utf-8", errors="replace")
+
+def rv(f, t):
+    if t == 0:  return struct.unpack("<B", f.read(1))[0]
+    if t == 1:  return struct.unpack("<b", f.read(1))[0]
+    if t == 2:  return struct.unpack("<H", f.read(2))[0]
+    if t == 3:  return struct.unpack("<h", f.read(2))[0]
+    if t == 4:  return struct.unpack("<I", f.read(4))[0]
+    if t == 5:  return struct.unpack("<i", f.read(4))[0]
+    if t == 6:  return struct.unpack("<f", f.read(4))[0]
+    if t == 7:  return bool(struct.unpack("<B", f.read(1))[0])
+    if t == 8:  return rs(f)
+    if t == 9:
+        et = struct.unpack("<I", f.read(4))[0]
+        n  = struct.unpack("<Q", f.read(8))[0]
+        return [rv(f, et) for _ in range(n)]
+    if t == 10: return struct.unpack("<Q", f.read(8))[0]
+    if t == 11: return struct.unpack("<q", f.read(8))[0]
+    if t == 12: return struct.unpack("<d", f.read(8))[0]
+    raise ValueError(t)
+
+def skipv(f, t):
+    if t in SIZES:
+        f.seek(SIZES[t], 1)
+    elif t == 8:
+        n = struct.unpack("<Q", f.read(8))[0]; f.seek(n, 1)
+    elif t == 9:
+        et = struct.unpack("<I", f.read(4))[0]
+        n  = struct.unpack("<Q", f.read(8))[0]
+        if et == 8:
+            for _ in range(n):
+                m = struct.unpack("<Q", f.read(8))[0]; f.seek(m, 1)
+        elif et in SIZES:
+            f.seek(SIZES[et] * n, 1)
+        else:
+            for _ in range(n): skipv(f, et)
+
+out = {}
+with open(sys.argv[1], "rb") as f:
+    if f.read(4) != b"GGUF": sys.exit(0)
+    f.read(4); f.read(8)  # version, tensor_count
+    kvn = struct.unpack("<Q", f.read(8))[0]
+    for _ in range(kvn):
+        k = rs(f)
+        t = struct.unpack("<I", f.read(4))[0]
+        name = WANTED.get(k)
+        if name is None:
+            for sfx, n2 in SUFFIXES.items():
+                if k.endswith(sfx): name = n2; break
+        if name is not None:
+            out[name] = rv(f, t)
+            if len(out) >= 7: break
+        else:
+            skipv(f, t)
+
+for k, v in out.items():
+    print(f"{k}={v}")
+' "$file"
+}
+
+tune_for_model() {
+    local model_file="$1"
+    [[ -f "$model_file" ]] || return 0
+    info "=== Inspecting model metadata ==="
+
+    local meta arch native_ctx layers heads kv_heads emb_len key_len head_dim
+    meta="$(gguf_metadata "$model_file" 2>/dev/null || true)"
+    if [[ -z "$meta" ]]; then
+        warn "Could not read GGUF metadata; skipping auto-tune"
+        return 0
+    fi
+
+    while IFS='=' read -r k v; do
+        case "$k" in
+            arch)             arch="$v" ;;
+            context_length)   native_ctx="$v" ;;
+            block_count)      layers="$v" ;;
+            head_count)       heads="$v" ;;
+            head_count_kv)    kv_heads="$v" ;;
+            embedding_length) emb_len="$v" ;;
+            key_length)       key_len="$v" ;;
+        esac
+    done <<<"$meta"
+
+    : "${kv_heads:=${heads:-1}}"
+    if [[ -n "$key_len" ]]; then
+        head_dim="$key_len"
+    elif [[ -n "$emb_len" && -n "$heads" && "$heads" -gt 0 ]]; then
+        head_dim=$(( emb_len / heads ))
+    fi
+
+    info "  arch=${arch:-?}  native_ctx=${native_ctx:-?}  layers=${layers:-?}  heads=${heads:-?}/${kv_heads}  head_dim=${head_dim:-?}"
+
+    # Use native context if larger than what we already have
+    if [[ -n "$native_ctx" && "$native_ctx" -gt "$USER_CTX" ]]; then
+        info "  Native context (${native_ctx}) > requested ($USER_CTX) — using native"
+        USER_CTX="$native_ctx"
+    fi
+
+    # Estimate KV cache and auto-shrink if it would crowd RAM
+    if [[ -n "$layers" && -n "$head_dim" && -n "$kv_heads" && "$kv_heads" -gt 0 ]]; then
+        local kv_bytes mem_bytes
+        kv_bytes=$(( 2 * layers * kv_heads * head_dim * USER_CTX * 2 ))   # fp16
+        mem_bytes=$(( MEM_GB * 1024 * 1024 * 1024 ))
+        info "  KV cache @ ctx=$USER_CTX ≈ $(( kv_bytes / 1024 / 1024 )) MB (fp16)"
+        # If KV alone is >40% of RAM, drop to q8_0 (halves it)
+        if (( mem_bytes > 0 && kv_bytes * 5 > mem_bytes * 2 )); then
+            if [[ "${EXTRA_ARGS:-}" != *cache-type-* ]]; then
+                info "  KV would exceed ~40% of RAM — enabling q8_0 KV cache"
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cache-type-k q8_0 --cache-type-v q8_0"
+            fi
+        fi
+    fi
+}
+
 # ---------- HF API helpers ----------
 _hf_pick_gguf() {
     # Read tree JSON from stdin, echo the best GGUF filename.
@@ -777,6 +915,7 @@ main() {
             MODEL_GGUF="$(download_model "$MODEL_ID" "$MODEL_DIR")"
         fi
         MODEL_ID="$MODEL_GGUF"
+        tune_for_model "$MODEL_GGUF"
     fi
 
     write_config

@@ -72,15 +72,19 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 
 The installer writes a config file you can edit later; rerunning with `--resume` picks it up.
 
-### Context size
+### Context size and auto-tuning
 
-Defaults are 65 536 tokens across all use cases — enough for modern agentic workloads (tool use, multi-turn with large prompts). Qwen2.5 supports up to 128k natively; pass `--context 131072` if you have the RAM. KV cache scales linearly with context length and is roughly:
+The floor is 65 536 tokens across all use cases — enough for modern agentic workloads. After download the installer reads the GGUF's native context length from the file's metadata header; if it's larger than your requested context, **the native value is used instead**. Qwen3.5 reports 256k, Llama 3.1 reports 128k, etc.
+
+KV cache memory is then estimated as:
 
 ```
 KV bytes ≈ 2 × layers × kv_heads × head_dim × context × 2   # fp16
 ```
 
-For Qwen2.5-7B (GQA, 4 KV heads) that's ~4 GB at 65k, ~8 GB at 131k. If memory is tight, pass `--extra-args '--cache-type-k q8_0 --cache-type-v q8_0'` to halve it.
+If projected KV exceeds ~40 % of system RAM, the installer automatically appends `--cache-type-k q8_0 --cache-type-v q8_0` to the launcher (halves cache size with negligible quality loss).
+
+Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
 
 ### Safety checks
 
