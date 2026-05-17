@@ -487,14 +487,17 @@ show_recommendations() {
 
 # ---------- wizard ----------
 default_for_use_case() {
+    # 65 536 is the floor — modern agentic workloads (tool use, long prompts)
+    # routinely run past 32k. Qwen2.5 supports up to 128k natively.
     case "$1" in
-        1) REC_CONTEXT=8192;  DEFAULT_MODEL="bartowski/Qwen2.5-7B-Instruct-GGUF" ;;
-        2) REC_CONTEXT=16384; DEFAULT_MODEL="bartowski/Qwen2.5-Coder-7B-Instruct-GGUF" ;;
+        1) REC_CONTEXT=65536; DEFAULT_MODEL="bartowski/Qwen2.5-7B-Instruct-GGUF" ;;
+        2) REC_CONTEXT=65536; DEFAULT_MODEL="bartowski/Qwen2.5-Coder-7B-Instruct-GGUF" ;;
         3)
-            if (( MEM_GB >= 48 )); then
-                REC_CONTEXT=32768; DEFAULT_MODEL="bartowski/Meta-Llama-3.1-70B-Instruct-GGUF"
+            REC_CONTEXT=65536
+            if (( MEM_GB >= 64 )); then
+                DEFAULT_MODEL="bartowski/Meta-Llama-3.1-70B-Instruct-GGUF"
             else
-                REC_CONTEXT=16384; DEFAULT_MODEL="bartowski/Qwen2.5-7B-Instruct-GGUF"
+                DEFAULT_MODEL="bartowski/Qwen2.5-7B-Instruct-GGUF"
             fi ;;
         *) error "Invalid use-case: $1" ;;
     esac
@@ -515,7 +518,7 @@ maybe_resume() {
     info "Resumed config from $CONFIG_FILE"
     USE_CASE="${USE_CASE:-1}"
     MODEL_ID="${MODEL_ID:-}"
-    USER_CTX="${LLM_CONTEXT:-8192}"
+    USER_CTX="${LLM_CONTEXT:-65536}"
     USER_PORT="${LLM_PORT:-8000}"
     USER_GPU="${GPU_LAYERS:-$(gpu_layers_default)}"
     EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -674,7 +677,7 @@ CONFIG_FILE="__CONFIG_FILE__"
 LLAMA_SERVER="${LLAMA_SERVER:-__LLAMA_SERVER__}"
 MODEL="${MODEL_ID:-}"
 PORT="${LLM_PORT:-8000}"
-CTX="${LLM_CONTEXT:-8192}"
+CTX="${LLM_CONTEXT:-65536}"
 GPU="${GPU_LAYERS:-99}"
 THREADS="${LL_THREADS:-2}"
 

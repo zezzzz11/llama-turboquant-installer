@@ -72,6 +72,16 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 
 The installer writes a config file you can edit later; rerunning with `--resume` picks it up.
 
+### Context size
+
+Defaults are 65 536 tokens across all use cases — enough for modern agentic workloads (tool use, multi-turn with large prompts). Qwen2.5 supports up to 128k natively; pass `--context 131072` if you have the RAM. KV cache scales linearly with context length and is roughly:
+
+```
+KV bytes ≈ 2 × layers × kv_heads × head_dim × context × 2   # fp16
+```
+
+For Qwen2.5-7B (GQA, 4 KV heads) that's ~4 GB at 65k, ~8 GB at 131k. If memory is tight, pass `--extra-args '--cache-type-k q8_0 --cache-type-v q8_0'` to halve it.
+
 ### Safety checks
 
 - **Disk space**: before downloading, the installer queries the file size from the Hugging Face tree API and checks `df` — aborts with a clear message if there isn't ~10% headroom.
