@@ -174,16 +174,13 @@ pkg_hint() {
 check_tools() {
     info "=== Prerequisite check ==="
     local missing=()
-    for tool in git cmake curl awk; do
+    for tool in git curl awk tar; do
         if command -v "$tool" &>/dev/null; then
             info "  $tool: OK"
         else
             missing+=("$tool")
         fi
     done
-    if ! command -v c++ &>/dev/null && ! command -v g++ &>/dev/null && ! command -v clang++ &>/dev/null; then
-        missing+=("C++ compiler (clang or g++)")
-    fi
     if (( ${#missing[@]} > 0 )); then
         echo "Missing tools:" >&2
         for t in "${missing[@]}"; do
@@ -193,6 +190,26 @@ check_tools() {
             warn "Dry-run: continuing despite missing tools."
         else
             error "Install the missing prerequisites and re-run."
+        fi
+    fi
+}
+
+check_build_tools() {
+    # Only needed when we actually build from source.
+    local missing=()
+    command -v cmake &>/dev/null || missing+=("cmake")
+    if ! command -v c++ &>/dev/null && ! command -v g++ &>/dev/null && ! command -v clang++ &>/dev/null; then
+        missing+=("C++ compiler (clang or g++)")
+    fi
+    if (( ${#missing[@]} > 0 )); then
+        echo "Source build requires:" >&2
+        for t in "${missing[@]}"; do
+            echo "  • $t — $(pkg_hint "$t")" >&2
+        done
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            warn "Dry-run: continuing despite missing build tools."
+        else
+            error "Install the missing build tools and re-run, or use the prebuilt path if available."
         fi
     fi
 }
@@ -379,6 +396,7 @@ install_prebuilt() {
 
 build_from_source() {
     info "=== Building from source ==="
+    check_build_tools
     if [[ ! -d "${SRC_DIR}/.git" ]]; then
         info "Cloning $REPO_URL"
         run mkdir -p "$(dirname "$SRC_DIR")"
