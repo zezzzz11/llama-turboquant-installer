@@ -6,29 +6,172 @@
 
 set -euo pipefail
 
-# ---------- helpers ----------
-info()  { printf "\033[1;34m[INFO]\033[0m  %s\n" "$*" >&2; }
-warn()  { printf "\033[1;33m[WARN]\033[0m  %s\n" "$*" >&2; }
-error() { printf "\033[1;31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+# ════════════════════════════════════════════════════════════════════
+#  Colors & formatting
+# ════════════════════════════════════════════════════════════════════
+if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]; then
+    C_RESET=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_RED=$'\033[0;31m'
+    C_GREEN=$'\033[0;32m'
+    C_YELLOW=$'\033[0;33m'
+    C_BLUE=$'\033[0;34m'
+    C_MAGENTA=$'\033[0;35m'
+    C_CYAN=$'\033[0;36m'
+    C_BBLUE=$'\033[1;34m'
+    C_BGREEN=$'\033[1;32m'
+    C_BCYAN=$'\033[1;36m'
+    C_BMAGENTA=$'\033[1;35m'
+else
+    C_RESET="" C_BOLD="" C_DIM=""
+    C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA="" C_CYAN=""
+    C_BBLUE="" C_BGREEN="" C_BCYAN="" C_BMAGENTA=""
+fi
 
-ask() { local r; read -rp "? $* " r; echo "$r"; }
+step() {
+    local title="$1"
+    local pad=$(( 60 - ${#title} - 4 ))
+    (( pad < 0 )) && pad=0
+    local bar=""
+    (( pad > 0 )) && printf -v bar '━%.0s' $(seq 1 "$pad")
+    printf "\n${C_BCYAN}━━━ %s${C_RESET} ${C_DIM}%s${C_RESET}\n" "$title" "$bar" >&2
+}
+info()   { printf "${C_BBLUE}[i]${C_RESET} %s\n" "$*" >&2; }
+ok()     { printf "${C_BGREEN}[✓]${C_RESET} %s\n" "$*" >&2; }
+warn()   { printf "${C_YELLOW}[!]${C_RESET} %s\n" "$*" >&2; }
+error()  { printf "${C_RED}[✗]${C_RESET} %s\n" "$*" >&2; exit 1; }
+hint()   { printf "    ${C_DIM}%s${C_RESET}\n" "$*" >&2; }
+dim()    { printf "${C_DIM}%s${C_RESET}" "$1"; }
 
-confirm() {
-    if [[ "${ASSUME_YES:-0}" -eq 1 ]]; then return 0; fi
+# Max attempts on any interactive prompt before bailing.
+PROMPT_MAX_ATTEMPTS=5
+
+# ────────────────────────────────────────────────────────────────────
+#  Interactive helpers (bounded retries, default values shown clearly)
+# ────────────────────────────────────────────────────────────────────
+ask_yn() {
+    # ask_yn "<question>" [Y|N]
+    local q="$1" def="${2:-N}"
+    local hint_str
+    if [[ "$def" == "Y" ]]; then hint_str="[${C_BGREEN}Y${C_RESET}/n]"
+    else                          hint_str="[y/${C_BGREEN}N${C_RESET}]"
+    fi
+    if [[ "${ASSUME_YES:-0}" -eq 1 ]]; then
+        [[ "$def" == "Y" ]] && return 0 || return 1
+    fi
+    local r attempts=0
+    while (( attempts < PROMPT_MAX_ATTEMPTS )); do
+        printf "${C_BMAGENTA}?${C_RESET} ${C_BOLD}%s${C_RESET} %s " "$q" "$hint_str" >&2
+        if ! read -r r; then
+            warn "Input closed; using default ($def)"
+            r="$def"
+        fi
+        r="${r:-$def}"
+        case "$r" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+            [nN]|[nN][oO])     return 1 ;;
+        esac
+        warn "Please answer y or n (got: \"$r\")"
+        attempts=$(( attempts + 1 ))
+    done
+    error "Too many invalid answers — aborting"
+}
+
+ask_number() {
+    # ask_number "<question>" <default> [min] [max]
+    local q="$1" def="$2" min="${3:-1}" max="${4:-2147483647}"
+    if [[ "${ASSUME_YES:-0}" -eq 1 ]]; then
+        printf '%s\n' "$def"
+        return 0
+    fi
+    local r attempts=0
+    while (( attempts < PROMPT_MAX_ATTEMPTS )); do
+        printf "${C_BMAGENTA}?${C_RESET} ${C_BOLD}%s${C_RESET} ${C_DIM}[default${C_RESET} ${C_BGREEN}%s${C_RESET}${C_DIM}]${C_RESET}: " "$q" "$def" >&2
+        if ! read -r r; then
+            warn "Input closed; using default ($def)"
+            printf '%s\n' "$def"
+            return 0
+        fi
+        r="${r:-$def}"
+        if [[ "$r" =~ ^[0-9]+$ ]] && (( r >= min && r <= max )); then
+            printf '%s\n' "$r"
+            return 0
+        fi
+        warn "Enter a whole number between $min and $max (got: \"$r\")"
+        attempts=$(( attempts + 1 ))
+    done
+    error "Too many invalid answers — aborting"
+}
+
+ask_string() {
+    # ask_string "<question>" [default]
+    local q="$1" def="${2:-}"
+    if [[ "${ASSUME_YES:-0}" -eq 1 ]]; then
+        printf '%s\n' "$def"
+        return 0
+    fi
     local r
-    read -rp "? $* [y/N] " r
-    [[ "$r" =~ ^[yY]([eE][sS])?$ ]]
+    if [[ -n "$def" ]]; then
+        printf "${C_BMAGENTA}?${C_RESET} ${C_BOLD}%s${C_RESET} ${C_DIM}[default${C_RESET} ${C_BGREEN}%s${C_RESET}${C_DIM}]${C_RESET}: " "$q" "$def" >&2
+    else
+        printf "${C_BMAGENTA}?${C_RESET} ${C_BOLD}%s${C_RESET} " "$q" >&2
+    fi
+    if ! read -r r; then r=""; fi
+    printf '%s\n' "${r:-$def}"
+}
+
+choose_menu() {
+    # choose_menu "<title>" <default-idx> <opt1> <opt2> ...
+    # Echoes the chosen index (1..N).
+    local title="$1" default="$2"; shift 2
+    local opts=("$@")
+    local n="${#opts[@]}"
+    (( n >= 1 )) || error "choose_menu called with no options"
+    printf "${C_BOLD}%s${C_RESET}\n" "$title" >&2
+    local i
+    for i in "${!opts[@]}"; do
+        local idx=$(( i + 1 ))
+        if [[ "$idx" == "$default" ]]; then
+            printf "  ${C_BGREEN}%d)${C_RESET} %s ${C_DIM}(default)${C_RESET}\n" "$idx" "${opts[$i]}" >&2
+        else
+            printf "  ${C_BOLD}%d)${C_RESET} %s\n" "$idx" "${opts[$i]}" >&2
+        fi
+    done
+    if [[ "${ASSUME_YES:-0}" -eq 1 ]]; then
+        printf '%s\n' "$default"
+        return 0
+    fi
+    local r attempts=0
+    while (( attempts < PROMPT_MAX_ATTEMPTS )); do
+        printf "${C_BMAGENTA}?${C_RESET} ${C_BOLD}Choose [1-%d]${C_RESET}: " "$n" >&2
+        if ! read -r r; then
+            warn "Input closed; using default ($default)"
+            printf '%s\n' "$default"
+            return 0
+        fi
+        r="${r:-$default}"
+        if [[ "$r" =~ ^[0-9]+$ ]] && (( r >= 1 && r <= n )); then
+            printf '%s\n' "$r"
+            return 0
+        fi
+        warn "Enter a number between 1 and $n (got: \"$r\")"
+        attempts=$(( attempts + 1 ))
+    done
+    error "Too many invalid answers — aborting"
 }
 
 run() {
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-        printf "\033[1;35m[DRY]\033[0m   %s\n" "$*" >&2
+        printf "${C_MAGENTA}[dry]${C_RESET} %s\n" "$*" >&2
     else
         "$@"
     fi
 }
 
-# ---------- paths ----------
+# ════════════════════════════════════════════════════════════════════
+#  Paths
+# ════════════════════════════════════════════════════════════════════
 HOME_DIR="${HOME}"
 BIN_DIR="${HOME_DIR}/.local/bin"
 SHARE_DIR="${HOME_DIR}/.local/share/llama-cpp-turboquant"
@@ -40,7 +183,9 @@ LAUNCHER_SCRIPT="${BIN_DIR}/llm-server"
 REPO_URL="${REPO_URL:-https://github.com/TheTom/llama-cpp-turboquant.git}"
 REPO_RELEASES_API="${REPO_RELEASES_API:-https://api.github.com/repos/TheTom/llama-cpp-turboquant/releases/latest}"
 
-# ---------- CLI ----------
+# ════════════════════════════════════════════════════════════════════
+#  CLI flags
+# ════════════════════════════════════════════════════════════════════
 ASSUME_YES=0
 RESUME=0
 UNINSTALL=0
@@ -56,29 +201,29 @@ CLI_GPU=""
 CLI_EXTRA=""
 
 usage() {
-    cat <<'USAGE'
-llama-turboquant-installer
+    cat <<USAGE
+${C_BOLD}llama-turboquant-installer${C_RESET}
 
-Usage: install.sh [options]
+${C_BOLD}Usage:${C_RESET}  install.sh [options]
 
-Options:
+${C_BOLD}Options:${C_RESET}
   --use-case {1|2|3}        1=chat, 2=code, 3=research
-  --model <hf-repo-id>      Hugging Face GGUF repo (e.g. bartowski/Qwen2.5-7B-Instruct-GGUF)
+  --model <hf-repo-id>      Hugging Face GGUF repo
   --port <int>              llama-server port (default 8000)
-  --context <int>           context length, tokens
-  --gpu-layers <int>        layers to offload to GPU (default 99 w/GPU, 0 w/CPU)
+  --context <int>           context length in tokens
+  --gpu-layers <int>        layers to offload to GPU
   --extra-args <str>        appended to the llama-server invocation
   --yes, -y                 non-interactive; accept defaults
   --resume                  reuse existing ~/.llm-server.env without asking
+  --reinstall               force re-install of llama-server (ignore existing)
+  --redownload              force re-download of the model
   --uninstall               remove installed files and exit
   --dry-run                 print actions without executing
-  --health-check            start the launcher, poll /health, then stop (smoke test)
-  --reinstall               force re-install of llama-server (ignore existing binaries)
-  --redownload              force re-download of the model even if the file is present
+  --health-check            start launcher, poll /health, then stop (smoke test)
   -h, --help                show this help
 
-Examples:
-  install.sh                # interactive
+${C_BOLD}Examples:${C_RESET}
+  install.sh
   install.sh --yes --use-case 2
   install.sh --yes --model bartowski/Qwen2.5-7B-Instruct-GGUF --port 8001
 USAGE
@@ -86,39 +231,48 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --use-case)    CLI_USE_CASE="${2:?--use-case requires value}"; shift 2 ;;
-        --model)       CLI_MODEL="${2:?--model requires value}"; shift 2 ;;
-        --port)        CLI_PORT="${2:?--port requires value}"; shift 2 ;;
-        --context)     CLI_CONTEXT="${2:?--context requires value}"; shift 2 ;;
-        --gpu-layers)  CLI_GPU="${2:?--gpu-layers requires value}"; shift 2 ;;
-        --extra-args)  CLI_EXTRA="${2:?--extra-args requires value}"; shift 2 ;;
-        --yes|-y)      ASSUME_YES=1; shift ;;
-        --resume)      RESUME=1; shift ;;
-        --uninstall)   UNINSTALL=1; shift ;;
-        --dry-run)     DRY_RUN=1; shift ;;
+        --use-case)     CLI_USE_CASE="${2:?--use-case requires value}"; shift 2 ;;
+        --model)        CLI_MODEL="${2:?--model requires value}"; shift 2 ;;
+        --port)         CLI_PORT="${2:?--port requires value}"; shift 2 ;;
+        --context)      CLI_CONTEXT="${2:?--context requires value}"; shift 2 ;;
+        --gpu-layers)   CLI_GPU="${2:?--gpu-layers requires value}"; shift 2 ;;
+        --extra-args)   CLI_EXTRA="${2:?--extra-args requires value}"; shift 2 ;;
+        --yes|-y)       ASSUME_YES=1; shift ;;
+        --resume)       RESUME=1; shift ;;
+        --reinstall)    REINSTALL=1; shift ;;
+        --redownload)   REDOWNLOAD=1; shift ;;
+        --uninstall)    UNINSTALL=1; shift ;;
+        --dry-run)      DRY_RUN=1; shift ;;
         --health-check) HEALTH_CHECK=1; shift ;;
-        --reinstall)   REINSTALL=1; shift ;;
-        --redownload)  REDOWNLOAD=1; shift ;;
-        -h|--help)     usage; exit 0 ;;
+        -h|--help)      usage; exit 0 ;;
         *) error "Unknown flag: $1 (try --help)" ;;
     esac
 done
 
-# ---------- uninstall ----------
+# ════════════════════════════════════════════════════════════════════
+#  Uninstall
+# ════════════════════════════════════════════════════════════════════
 do_uninstall() {
-    info "Uninstalling llama-turboquant-installer artifacts"
+    step "Uninstall"
+    if ! ask_yn "This will remove $SHARE_DIR, $CONFIG_FILE, and $LAUNCHER_SCRIPT. Continue?" "N"; then
+        info "Aborted"
+        exit 0
+    fi
     for p in "$SHARE_DIR" "$CONFIG_FILE" "$LAUNCHER_SCRIPT"; do
         if [[ -e "$p" ]]; then
-            info "  removing $p"
+            info "removing $p"
             run rm -rf "$p"
         fi
     done
-    info "Uninstall complete."
+    ok "Uninstall complete"
     exit 0
 }
 
-# ---------- platform detect ----------
+# ════════════════════════════════════════════════════════════════════
+#  Platform detection
+# ════════════════════════════════════════════════════════════════════
 detect_platform() {
+    step "Platform detection"
     local kernel arch
     kernel="$(uname -s)"
     arch="$(uname -m)"
@@ -159,15 +313,19 @@ detect_platform() {
         CMAKE_GPU_FLAGS=(-D GGML_VULKAN=ON)
     fi
 
-    info "Platform: $OS/$ARCH  RAM: ${MEM_GB} GB  Cores: ${PHYS_CORES}  GPU: ${GPU_BACKEND}"
+    info "OS / arch    : ${C_BOLD}$OS${C_RESET} / ${C_BOLD}$ARCH${C_RESET}"
+    info "RAM / cores  : ${C_BOLD}${MEM_GB} GB${C_RESET} / ${C_BOLD}${PHYS_CORES}${C_RESET}"
+    info "GPU backend  : ${C_BGREEN}${GPU_BACKEND}${C_RESET}"
 }
 
-# ---------- prereqs ----------
+# ════════════════════════════════════════════════════════════════════
+#  Pre-flight: tools, network, disk, permissions
+# ════════════════════════════════════════════════════════════════════
 pkg_hint() {
     local pkg="$1"
     if [[ "$OS" == macos ]]; then
         if command -v brew &>/dev/null; then echo "brew install $pkg"
-        else echo "install Homebrew from https://brew.sh, then 'brew install $pkg'"
+        else echo "install Homebrew (https://brew.sh) then: brew install $pkg"
         fi
     elif command -v apt-get &>/dev/null; then echo "sudo apt-get install -y $pkg"
     elif command -v dnf      &>/dev/null; then echo "sudo dnf install -y $pkg"
@@ -177,61 +335,67 @@ pkg_hint() {
     fi
 }
 
-check_tools() {
-    info "=== Prerequisite check ==="
+preflight() {
+    step "Pre-flight checks"
+
+    # Required tools (curl is mandatory; awk/tar/sed; git is needed for source builds)
     local missing=()
-    for tool in git curl awk tar; do
+    for tool in curl awk tar sed; do
         if command -v "$tool" &>/dev/null; then
-            info "  $tool: OK"
+            ok "$tool"
         else
             missing+=("$tool")
         fi
     done
     if (( ${#missing[@]} > 0 )); then
-        echo "Missing tools:" >&2
         for t in "${missing[@]}"; do
-            echo "  • $t — $(pkg_hint "$t")" >&2
+            warn "missing: $t  → $(pkg_hint "$t")"
         done
-        if [[ "$DRY_RUN" -eq 1 ]]; then
-            warn "Dry-run: continuing despite missing tools."
-        else
-            error "Install the missing prerequisites and re-run."
-        fi
+        [[ "$DRY_RUN" -eq 1 ]] || error "Install the missing prerequisites and re-run"
     fi
-}
 
-check_build_tools() {
-    # Only needed when we actually build from source.
-    local missing=()
-    command -v cmake &>/dev/null || missing+=("cmake")
-    if ! command -v c++ &>/dev/null && ! command -v g++ &>/dev/null && ! command -v clang++ &>/dev/null; then
-        missing+=("C++ compiler (clang or g++)")
+    # Network reachability
+    if curl -sfI --connect-timeout 5 https://huggingface.co >/dev/null 2>&1; then
+        ok "network: huggingface.co reachable"
+    else
+        warn "network: cannot reach huggingface.co — model downloads will fail"
+        [[ "$DRY_RUN" -eq 1 ]] || error "Check your connection and try again"
     fi
-    if (( ${#missing[@]} > 0 )); then
-        echo "Source build requires:" >&2
-        for t in "${missing[@]}"; do
-            echo "  • $t — $(pkg_hint "$t")" >&2
-        done
-        if [[ "$DRY_RUN" -eq 1 ]]; then
-            warn "Dry-run: continuing despite missing build tools."
-        else
-            error "Install the missing build tools and re-run, or use the prebuilt path if available."
-        fi
+
+    # Writable directories
+    if ! run mkdir -p "$BIN_DIR" "$MODEL_DIR" "$SHARE_DIR" 2>/dev/null; then
+        error "Cannot create install directories (${BIN_DIR}, ${SHARE_DIR})"
+    fi
+    [[ "$DRY_RUN" -eq 1 ]] || { [[ -w "$BIN_DIR" && -w "$SHARE_DIR" ]] || error "Install directories not writable"; }
+    ok "directories writable"
+
+    # Python3 (optional but used for GGUF metadata + sha verification)
+    if command -v python3 &>/dev/null; then
+        ok "python3 (optional, enables sha256 + GGUF tuning)"
+    else
+        warn "python3 not found — sha256 verification & native-context detection disabled"
     fi
 }
 
 ensure_hf_cli() {
-    if command -v huggingface-cli &>/dev/null; then return 0; fi
+    if command -v huggingface-cli &>/dev/null; then
+        ok "huggingface-cli"
+        return 0
+    fi
     info "huggingface-cli not found — attempting pip install"
-    pip3 install --user "huggingface_hub[cli]" 2>/dev/null \
-        || python3 -m pip install --user "huggingface_hub[cli]" 2>/dev/null \
-        || warn "Could not install huggingface-cli; will use curl fallback."
+    if pip3 install --user "huggingface_hub[cli]" 2>/dev/null \
+       || python3 -m pip install --user "huggingface_hub[cli]" 2>/dev/null; then
+        ok "huggingface-cli installed"
+    else
+        warn "Could not install huggingface-cli — falling back to plain curl"
+    fi
 }
 
-# ---------- GGUF metadata ----------
+# ════════════════════════════════════════════════════════════════════
+#  GGUF metadata reader
+# ════════════════════════════════════════════════════════════════════
 gguf_metadata() {
     # Echo "key=value" lines for the metadata fields we care about.
-    # Requires python3; returns nonzero silently otherwise.
     local file="$1"
     [[ -f "$file" ]] || return 1
     command -v python3 &>/dev/null || return 1
@@ -314,7 +478,7 @@ for k, v in out.items():
 tune_for_model() {
     local model_file="$1"
     [[ -f "$model_file" ]] || return 0
-    info "=== Inspecting model metadata ==="
+    step "Auto-tune from GGUF metadata"
 
     local meta arch native_ctx layers heads kv_heads emb_len key_len head_dim
     meta="$(gguf_metadata "$model_file" 2>/dev/null || true)"
@@ -342,53 +506,45 @@ tune_for_model() {
         head_dim=$(( emb_len / heads ))
     fi
 
-    info "  arch=${arch:-?}  native_ctx=${native_ctx:-?}  layers=${layers:-?}  heads=${heads:-?}/${kv_heads}  head_dim=${head_dim:-?}"
+    info "arch=${C_BOLD}${arch:-?}${C_RESET}  native_ctx=${C_BOLD}${native_ctx:-?}${C_RESET}  layers=${layers:-?}  heads=${heads:-?}/${kv_heads}  head_dim=${head_dim:-?}"
 
-    # Use native context if larger than what we already have
     if [[ -n "$native_ctx" && "$native_ctx" -gt "$USER_CTX" ]]; then
-        info "  Native context (${native_ctx}) > requested ($USER_CTX) — using native"
+        ok "Native context (${native_ctx}) > requested (${USER_CTX}) — using native"
         USER_CTX="$native_ctx"
     fi
 
-    # Estimate KV cache and auto-shrink if it would crowd RAM
     if [[ -n "$layers" && -n "$head_dim" && -n "$kv_heads" && "$kv_heads" -gt 0 ]]; then
         local kv_bytes mem_bytes
         kv_bytes=$(( 2 * layers * kv_heads * head_dim * USER_CTX * 2 ))   # fp16
         mem_bytes=$(( MEM_GB * 1024 * 1024 * 1024 ))
-        info "  KV cache @ ctx=$USER_CTX ≈ $(( kv_bytes / 1024 / 1024 )) MB (fp16)"
-        # If KV alone is >40% of RAM, drop to q8_0 (halves it)
+        info "KV cache @ ctx=${USER_CTX} ≈ ${C_BOLD}$(( kv_bytes / 1024 / 1024 )) MB${C_RESET} (fp16)"
         if (( mem_bytes > 0 && kv_bytes * 5 > mem_bytes * 2 )); then
             if [[ "${EXTRA_ARGS:-}" != *cache-type-* ]]; then
-                info "  KV would exceed ~40% of RAM — enabling q8_0 KV cache"
+                ok "KV would exceed ~40% of RAM — enabling q8_0 KV cache"
                 EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cache-type-k q8_0 --cache-type-v q8_0"
             fi
         fi
     fi
 
-    # FlashAttention: big speed/memory win on Metal & CUDA at long context.
-    # Skipped on CPU/Vulkan/HIP where support is partial or slower.
-    # NB: recent llama-server requires a value ('on'|'off'|'auto'), not a bare flag.
     case "$GPU_BACKEND" in
         metal|cuda)
             if [[ "${EXTRA_ARGS:-}" != *flash-attn* ]]; then
-                info "  Enabling --flash-attn on ($GPU_BACKEND backend)"
+                ok "Enabling --flash-attn on (${GPU_BACKEND} backend)"
                 EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--flash-attn on"
             fi
             ;;
     esac
 
-    # Jinja: use the model's built-in chat template from GGUF metadata.
-    # Near-mandatory for tool calling with modern instruct models.
     if [[ "${EXTRA_ARGS:-}" != *--jinja* ]]; then
-        info "  Enabling --jinja (chat template from GGUF, needed for tool calls)"
+        ok "Enabling --jinja (chat template from GGUF, needed for tool calls)"
         EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--jinja"
     fi
 }
 
-# ---------- HF API helpers ----------
+# ════════════════════════════════════════════════════════════════════
+#  HF API helpers
+# ════════════════════════════════════════════════════════════════════
 _hf_pick_gguf() {
-    # Read tree JSON from stdin, echo the best GGUF filename.
-    # Prefers Q4_K_M > Q5_K_M > shortest-name GGUF.
     python3 -c '
 import json, sys
 try:
@@ -406,7 +562,6 @@ if ggufs:
 }
 
 _hf_field() {
-    # _hf_field <path> {size|sha} — reads tree JSON from stdin
     python3 -c '
 import json, sys
 try:
@@ -430,11 +585,11 @@ check_disk_space() {
     local free_kb need_kb
     free_kb="$(df -k "$dest" 2>/dev/null | awk 'NR==2 {print $4}')"
     [[ -z "$free_kb" ]] && { warn "Could not determine free disk space at $dest"; return 0; }
-    need_kb=$(( need_bytes / 1024 * 11 / 10 ))   # +10% margin
+    need_kb=$(( need_bytes / 1024 * 11 / 10 ))
     if (( free_kb < need_kb )); then
         error "Insufficient disk space at $dest: $(( free_kb / 1024 )) MB free, need ~$(( need_kb / 1024 )) MB"
     fi
-    info "Disk space OK: $(( free_kb / 1024 )) MB free, need ~$(( need_kb / 1024 )) MB"
+    ok "Disk space: $(( free_kb / 1024 )) MB free, ${C_DIM}need ~$(( need_kb / 1024 )) MB${C_RESET}"
 }
 
 verify_sha256() {
@@ -453,23 +608,24 @@ verify_sha256() {
     if [[ "$got" != "$expected" ]]; then
         error "sha256 mismatch on $file: expected $expected, got $got"
     fi
-    info "sha256 OK"
+    ok "sha256 OK"
 }
 
-# ---------- model download ----------
+# ════════════════════════════════════════════════════════════════════
+#  Model download
+# ════════════════════════════════════════════════════════════════════
 download_model() {
     local model_id="$1" dest="$2"
     run mkdir -p "$dest"
-    info "Fetching model: $model_id → $dest"
+    step "Model download"
+    info "Model: ${C_BOLD}${model_id}${C_RESET}"
+    info "Dest:  ${dest}"
 
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-        echo "${dest}/__dryrun__.gguf"
+        printf '%s\n' "${dest}/__dryrun__.gguf"
         return 0
     fi
 
-    # Use the HF tree API for size pre-check, sha256, and file pick.
-    # CRITICAL: without picking a specific file, huggingface-cli downloads the
-    # entire repo — bartowski's GGUF repos contain every quant level (50+ GB).
     local tree="" pick="" expected_sha="" expected_size=0
     tree="$(curl -sfL "https://huggingface.co/api/models/${model_id}/tree/main" 2>/dev/null || true)"
     if [[ -n "$tree" ]] && command -v python3 &>/dev/null; then
@@ -480,27 +636,27 @@ download_model() {
             check_disk_space "$dest" "${expected_size:-0}"
         fi
     fi
-    # Regex fallback if python3 isn't available
     if [[ -z "$pick" && -n "$tree" ]]; then
         pick="$(printf '%s' "$tree" \
             | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]*\.gguf"' \
             | sed -E 's/.*"([^"]+)"$/\1/' \
             | { grep -m1 -i 'Q4_K_M' || head -n1; })"
     fi
+    [[ -z "$pick" ]] && error "Could not identify a target GGUF in ${model_id}"
+    info "Target file: ${C_BOLD}${pick}${C_RESET}"
 
-    # If the target file is already on disk, decide whether to reuse or re-download
-    if [[ -n "$pick" && -f "${dest}/${pick}" ]]; then
+    if [[ -f "${dest}/${pick}" ]]; then
         if [[ "$REDOWNLOAD" -eq 1 ]]; then
-            info "  --redownload: removing existing ${pick}"
+            info "--redownload: removing existing ${pick}"
             run rm -f "${dest}/${pick}"
         elif [[ "$ASSUME_YES" -eq 1 ]]; then
-            info "Model already present at ${dest}/${pick} — reusing (pass --redownload to refresh)"
-            echo "${dest}/${pick}"
+            ok "Model already present — reusing"
+            printf '%s\n' "${dest}/${pick}"
             return 0
         else
-            echo "Model already present: ${dest}/${pick}" >&2
-            if confirm "Reuse it and skip the download?"; then
-                echo "${dest}/${pick}"
+            ok "Model file already present: $(du -h "${dest}/${pick}" | awk '{print $1}')"
+            if ask_yn "Reuse it and skip the download?" "Y"; then
+                printf '%s\n' "${dest}/${pick}"
                 return 0
             fi
             info "Re-downloading"
@@ -509,23 +665,14 @@ download_model() {
     fi
 
     if command -v huggingface-cli &>/dev/null; then
-        local include_args=()
-        if [[ -n "$pick" ]]; then
-            include_args=(--include "$pick")
-            info "→ huggingface-cli download $pick"
-        else
-            warn "Could not identify a specific GGUF — downloading entire repo"
-        fi
+        info "Using huggingface-cli (filtering to ${pick})"
         huggingface-cli download "$model_id" \
             --local-dir "$dest" --resume-download \
-            "${include_args[@]}" >/dev/null \
-            || error "huggingface-cli download failed for $model_id"
+            --include "$pick" >/dev/null \
+            || error "huggingface-cli download failed for ${model_id}"
     else
-        info "→ HF API fallback"
-        [[ -z "$tree" ]] && error "Cannot reach HF API for $model_id"
-        [[ -z "$pick" ]] && error "No GGUF files in $model_id"
-        info "Downloading $pick"
-        curl -fL "https://huggingface.co/${model_id}/resolve/main/${pick}" \
+        info "Using curl"
+        curl -fL --progress-bar "https://huggingface.co/${model_id}/resolve/main/${pick}" \
             -o "${dest}/$(basename "$pick")" \
             || error "Download failed for $pick"
         verify_sha256 "${dest}/$(basename "$pick")" "$expected_sha"
@@ -534,13 +681,14 @@ download_model() {
     local gguf
     gguf="$(find "$dest" -name '*.gguf' -type f | head -n1 || true)"
     [[ -z "$gguf" ]] && error "No GGUF file found in $dest after download"
-    echo "$gguf"
+    ok "Downloaded: ${gguf}"
+    printf '%s\n' "$gguf"
 }
 
-# ---------- prebuilt vs source ----------
+# ════════════════════════════════════════════════════════════════════
+#  Binary: prebuilt vs source
+# ════════════════════════════════════════════════════════════════════
 prebuilt_asset_pattern() {
-    # Echo a regex matching the asset name for this platform, or empty if none.
-    # The upstream repo currently ships only macOS arm64 Metal as a Unix-friendly asset.
     case "$OS-$ARCH-$GPU_BACKEND" in
         macos-arm64-metal) echo 'macos-arm64-metal\.tar\.gz' ;;
         *) echo "" ;;
@@ -548,11 +696,11 @@ prebuilt_asset_pattern() {
 }
 
 install_prebuilt() {
-    info "=== Downloading prebuilt binary ==="
+    step "Prebuilt binary"
     local pat
     pat="$(prebuilt_asset_pattern)"
     if [[ -z "$pat" ]]; then
-        info "No prebuilt asset for $OS/$ARCH/$GPU_BACKEND — will build from source"
+        info "No prebuilt asset for ${OS}/${ARCH}/${GPU_BACKEND} — falling back to source build"
         return 1
     fi
     local url
@@ -568,31 +716,46 @@ install_prebuilt() {
     info "Downloading: $url"
     local tmp
     tmp="$(mktemp -t llama-tq.XXXXXX)"
-    if ! run curl -fL "$url" -o "$tmp"; then
+    if ! run curl -fL --progress-bar "$url" -o "$tmp"; then
         rm -f "$tmp"
         return 1
     fi
-    # Extract into a staging dir, then consolidate binaries + dylibs +
-    # symlinks (the binary uses @rpath/lib<x>.0.dylib which is a symlink to
-    # the versioned file — both must end up in the same directory).
+    # Extract into a staging dir, then consolidate binaries + dylibs + symlinks
+    # into ${SHARE_DIR}/bin/.
     local stage
     stage="$(mktemp -d "${SHARE_DIR}/.stage.XXXXXX")"
     run tar -xzf "$tmp" -C "$stage"
     rm -f "$tmp"
     run mkdir -p "${SHARE_DIR}/bin"
-    # No -type filter: -name matches files AND symlinks, which is what we
-    # want for the lib<x>.0.dylib symlinks. mv preserves symlinks (doesn't
-    # dereference). All targets are relative names within the same dir.
     find "$stage" -mindepth 1 \
         \( -name 'llama-*' -o -name '*.dylib' -o -name '*.so' -o -name '*.metal' \) \
         -exec mv {} "${SHARE_DIR}/bin/" \; 2>/dev/null || true
     rm -rf "$stage"
-    info "Installed to ${SHARE_DIR}/bin"
+    ok "Installed to ${SHARE_DIR}/bin"
     return 0
 }
 
+check_build_tools() {
+    local missing=()
+    command -v git   &>/dev/null || missing+=("git")
+    command -v cmake &>/dev/null || missing+=("cmake")
+    if ! command -v c++ &>/dev/null && ! command -v g++ &>/dev/null && ! command -v clang++ &>/dev/null; then
+        missing+=("C++ compiler (clang or g++)")
+    fi
+    if (( ${#missing[@]} > 0 )); then
+        for t in "${missing[@]}"; do
+            warn "Source build requires: $t  → $(pkg_hint "$t")"
+        done
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            warn "Dry-run: continuing despite missing build tools"
+        else
+            error "Install the missing build tools and re-run"
+        fi
+    fi
+}
+
 build_from_source() {
-    info "=== Building from source ==="
+    step "Source build"
     check_build_tools
     if [[ ! -d "${SRC_DIR}/.git" ]]; then
         info "Cloning $REPO_URL"
@@ -614,67 +777,76 @@ build_from_source() {
     run mkdir -p "${SHARE_DIR}/bin"
     find "$build" -maxdepth 4 -type f \( -name llama-server -o -name llama-cli \) \
         -exec cp {} "${SHARE_DIR}/bin/" \; 2>/dev/null || true
-    info "Binaries placed in ${SHARE_DIR}/bin"
+    ok "Binaries placed in ${SHARE_DIR}/bin"
+}
+
+verify_binary() {
+    local bin="$1"
+    [[ "$DRY_RUN" -eq 1 ]] && return 0
+    [[ -x "$bin" ]] || { warn "Binary not executable: $bin"; return 1; }
+    if ! "$bin" --version >/dev/null 2>&1; then
+        warn "Binary failed --version check (likely missing libraries)"
+        if [[ "$OS" == macos ]]; then
+            otool -L "$bin" 2>/dev/null | grep '@rpath' | head -5 >&2 || true
+        else
+            ldd "$bin" 2>/dev/null | grep "not found" | head -5 >&2 || true
+        fi
+        return 1
+    fi
+    ok "Binary works: $("$bin" --version 2>&1 | head -1)"
+    return 0
 }
 
 choose_binary_method() {
+    step "llama-server binary"
     local local_bin="${SHARE_DIR}/bin/llama-server"
     local sys_bin
     sys_bin="$(command -v llama-server 2>/dev/null || true)"
-    # If our own copy is also on PATH, don't double-count it
     [[ "$sys_bin" == "$local_bin" ]] && sys_bin=""
 
     if [[ "$REINSTALL" -eq 1 ]]; then
         info "--reinstall: removing existing installer binaries"
         run rm -rf "${SHARE_DIR}/bin" "${SRC_DIR}/build"
-        [[ -x "$local_bin" ]] || local_bin=""
+        local_bin=""
     fi
 
-    # Already have our own — done.
-    if [[ -x "$local_bin" ]]; then
+    if [[ -x "$local_bin" ]] && verify_binary "$local_bin"; then
         LLAMA_SERVER_PATH="$local_bin"
-        info "Found installer-owned llama-server: $LLAMA_SERVER_PATH"
+        ok "Using installer-owned binary: ${C_BOLD}${LLAMA_SERVER_PATH}${C_RESET}"
         return 0
     fi
 
-    # System binary present — ask, don't silently use it.
     if [[ -n "$sys_bin" ]]; then
         if [[ "$ASSUME_YES" -eq 1 ]]; then
-            warn "System llama-server at $sys_bin will be used (likely plain llama.cpp, not TurboQuant)."
-            warn "Pass --reinstall to install TurboQuant instead."
+            warn "System llama-server at ${sys_bin} will be used"
+            hint "(likely plain llama.cpp, not TurboQuant — pass --reinstall to install TurboQuant)"
+            verify_binary "$sys_bin" || warn "system binary failed --version"
             LLAMA_SERVER_PATH="$sys_bin"
             return 0
         fi
-        echo "Found existing llama-server on PATH: $sys_bin" >&2
-        echo "  This is probably plain llama.cpp (Homebrew, etc.), not the TurboQuant fork." >&2
-        echo "Options:" >&2
-        echo "  1) Use it as-is (no TurboQuant quants)" >&2
-        echo "  2) Install TurboQuant prebuilt into ${SHARE_DIR}/bin (recommended) [default]" >&2
-        echo "  3) Build TurboQuant from source" >&2
-        local c
-        read -rp "? Choose [1-3, default 2]: " c
-        c="${c:-2}"
-        case "$c" in
+        warn "Found system llama-server: ${C_BOLD}${sys_bin}${C_RESET}"
+        hint "This is probably plain llama.cpp, not the TurboQuant fork."
+        local choice
+        choice=$(choose_menu "How should we proceed?" 2 \
+            "Use this binary as-is (no TurboQuant low-bit quants)" \
+            "Install TurboQuant prebuilt into ${SHARE_DIR}/bin" \
+            "Build TurboQuant from source")
+        case "$choice" in
             1) LLAMA_SERVER_PATH="$sys_bin" ;;
             2) install_prebuilt || build_from_source ;;
             3) build_from_source ;;
-            *) error "Invalid selection" ;;
         esac
     else
-        # Nothing on disk — install.
         if [[ "$ASSUME_YES" -eq 1 ]]; then
             install_prebuilt || build_from_source
         else
-            echo "No llama-server found. Install via:" >&2
-            echo "  1) Prebuilt (fall back to source if unavailable) [default]" >&2
-            echo "  2) Build from source" >&2
-            local c
-            read -rp "? Choose [1-2, default 1]: " c
-            c="${c:-1}"
-            case "$c" in
+            local choice
+            choice=$(choose_menu "No llama-server found. Install it via:" 1 \
+                "Prebuilt binary (falls back to source if not available for your platform)" \
+                "Build from source")
+            case "$choice" in
                 1) install_prebuilt || build_from_source ;;
                 2) build_from_source ;;
-                *) error "Invalid selection" ;;
             esac
         fi
     fi
@@ -687,45 +859,43 @@ choose_binary_method() {
     if [[ -z "$LLAMA_SERVER_PATH" && "${DRY_RUN:-0}" -ne 1 ]]; then
         error "llama-server not found after install/build"
     fi
-    info "llama-server: ${LLAMA_SERVER_PATH:-<dry-run>}"
+    if [[ -n "$LLAMA_SERVER_PATH" ]]; then
+        verify_binary "$LLAMA_SERVER_PATH" || warn "Verification failed; the launcher may not start cleanly"
+    fi
 }
 
-# ---------- recommendations ----------
+# ════════════════════════════════════════════════════════════════════
+#  Recommendations
+# ════════════════════════════════════════════════════════════════════
 fits_under() {
     awk -v size="$1" -v mem="$MEM_GB" -v mult="$2" \
         'BEGIN { exit !(size < mem * mult) }'
 }
 
 show_recommendations() {
-    info "=== Recommendations for ${MEM_GB} GB / ${PHYS_CORES} cores ==="
-    info "    (reserving ~50% of RAM for KV cache, context shifts, OS)"
+    info "${C_DIM}(reserving ~50% of RAM for KV cache + context shifts + OS)${C_RESET}"
     local entries=(
         "bartowski/Qwen2.5-7B-Instruct-GGUF:4.5"
         "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:4.8"
         "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:5.5"
         "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF:40.0"
     )
-    # Thresholds are fraction of RAM the model itself occupies.
-    # < 0.5 = lots of room for KV at long context.
-    # < 0.8 = fits but only with q8_0 KV and/or shorter context.
-    # else  = won't fit usefully.
     for entry in "${entries[@]}"; do
         local name="${entry%%:*}" gb="${entry##*:}"
         if fits_under "$gb" 0.5; then
-            echo "  [OK]    $name (~${gb} GB) — fits with room for long context"
+            printf "  ${C_BGREEN}[OK]${C_RESET}    %-50s ${C_DIM}~%s GB — comfortable${C_RESET}\n" "$name" "$gb" >&2
         elif fits_under "$gb" 0.8; then
-            echo "  [TIGHT] $name (~${gb} GB) — fits but needs q8_0 KV / shorter ctx"
+            printf "  ${C_YELLOW}[TIGHT]${C_RESET} %-50s ${C_DIM}~%s GB — needs q8_0 KV / shorter ctx${C_RESET}\n" "$name" "$gb" >&2
         else
-            echo "  [BIG]   $name (~${gb} GB) — too large for ${MEM_GB} GB"
+            printf "  ${C_RED}[BIG]${C_RESET}   %-50s ${C_DIM}~%s GB — too large for ${MEM_GB} GB${C_RESET}\n" "$name" "$gb" >&2
         fi
     done
-    echo
 }
 
-# ---------- wizard ----------
+# ════════════════════════════════════════════════════════════════════
+#  Wizard
+# ════════════════════════════════════════════════════════════════════
 default_for_use_case() {
-    # 65 536 is the floor — modern agentic workloads (tool use, long prompts)
-    # routinely run past 32k. Qwen2.5 supports up to 128k natively.
     case "$1" in
         1) REC_CONTEXT=65536; DEFAULT_MODEL="bartowski/Qwen2.5-7B-Instruct-GGUF" ;;
         2) REC_CONTEXT=65536; DEFAULT_MODEL="bartowski/Qwen2.5-Coder-7B-Instruct-GGUF" ;;
@@ -741,18 +911,18 @@ default_for_use_case() {
 }
 
 gpu_layers_default() {
-    if [[ "$GPU_BACKEND" == "cpu" ]]; then echo 0; else echo 99; fi
+    [[ "$GPU_BACKEND" == "cpu" ]] && echo 0 || echo 99
 }
 
 maybe_resume() {
     [[ -f "$CONFIG_FILE" ]] || return 1
     if [[ "$RESUME" -ne 1 ]]; then
         if [[ "$ASSUME_YES" -eq 1 ]]; then return 1; fi
-        confirm "Existing config at $CONFIG_FILE — reuse it?" || return 1
+        ask_yn "Existing config at $CONFIG_FILE — reuse it?" "Y" || return 1
     fi
     # shellcheck source=/dev/null
     . "$CONFIG_FILE"
-    info "Resumed config from $CONFIG_FILE"
+    ok "Resumed config from $CONFIG_FILE"
     USE_CASE="${USE_CASE:-1}"
     MODEL_ID="${MODEL_ID:-}"
     USER_CTX="${LLM_CONTEXT:-65536}"
@@ -769,9 +939,11 @@ maybe_resume() {
 }
 
 run_setup_wizard() {
+    step "Configuration"
+
     if maybe_resume; then return; fi
 
-    if [[ "$ASSUME_YES" -ne 1 ]] && confirm "Show hardware-based model recommendations?"; then
+    if [[ "$ASSUME_YES" -ne 1 ]] && ask_yn "Show hardware-based model recommendations?" "Y"; then
         show_recommendations
     fi
 
@@ -780,17 +952,10 @@ run_setup_wizard() {
         if [[ "$ASSUME_YES" -eq 1 ]]; then
             USE_CASE=1
         else
-            echo "=== Use case ===" >&2
-            echo "  1) General chat / assistant" >&2
-            echo "  2) Programming / code assistance" >&2
-            echo "  3) Research / long-context analysis" >&2
-            while true; do
-                local _uc
-                read -rp "? Your choice [1-3, default 1]: " _uc
-                _uc="${_uc:-1}"
-                if [[ "$_uc" =~ ^[1-3]$ ]]; then USE_CASE="$_uc"; break; fi
-                echo "Enter 1, 2, or 3." >&2
-            done
+            USE_CASE=$(choose_menu "Use case" 1 \
+                "General chat / assistant" \
+                "Programming / code assistance" \
+                "Research / long-context analysis")
         fi
     fi
     [[ "$USE_CASE" =~ ^[1-3]$ ]] || error "Invalid --use-case: $USE_CASE"
@@ -801,84 +966,46 @@ run_setup_wizard() {
         if [[ "$ASSUME_YES" -eq 1 ]]; then
             MODEL_ID="$DEFAULT_MODEL"
         else
-            echo "Recommended model for use-case $USE_CASE: $DEFAULT_MODEL" >&2
-            local accept
-            while true; do
-                read -rp "? Accept this model? [Y/n] " accept
-                accept="$(printf '%s' "${accept:-y}" | tr '[:upper:]' '[:lower:]')"
-                [[ "$accept" =~ ^[yn]$ ]] && break
-            done
-            if [[ "$accept" == n ]]; then
-                while [[ -z "${MODEL_ID:-}" ]]; do
-                    read -rp "? Enter HuggingFace repo ID (owner/repo): " MODEL_ID
-                done
-            else
+            info "Recommended model: ${C_BOLD}${DEFAULT_MODEL}${C_RESET}"
+            if ask_yn "Accept this model?" "Y"; then
                 MODEL_ID="$DEFAULT_MODEL"
+            else
+                while [[ -z "$MODEL_ID" ]]; do
+                    MODEL_ID="$(ask_string "Enter HuggingFace repo ID (owner/repo)")"
+                    [[ -z "$MODEL_ID" ]] && warn "Cannot be empty"
+                done
             fi
         fi
     fi
 
     USER_CTX="${CLI_CONTEXT:-}"
-    if [[ -z "$USER_CTX" ]]; then
-        if [[ "$ASSUME_YES" -eq 1 ]]; then
-            USER_CTX="$REC_CONTEXT"
-        else
-            while true; do
-                local _c
-                read -rp "? Context size [$REC_CONTEXT]: " _c
-                USER_CTX="${_c:-$REC_CONTEXT}"
-                [[ "$USER_CTX" =~ ^[0-9]+$ ]] && break
-                echo "Enter a number." >&2
-            done
-        fi
-    fi
+    [[ -z "$USER_CTX" ]] && USER_CTX="$(ask_number "Context size (tokens)" "$REC_CONTEXT" 512 1048576)"
     [[ "$USER_CTX" =~ ^[0-9]+$ ]] || error "Invalid --context: $USER_CTX"
 
     USER_PORT="${CLI_PORT:-}"
-    if [[ -z "$USER_PORT" ]]; then
-        if [[ "$ASSUME_YES" -eq 1 ]]; then
-            USER_PORT=8000
-        else
-            while true; do
-                local _p
-                read -rp "? Server port [8000]: " _p
-                USER_PORT="${_p:-8000}"
-                [[ "$USER_PORT" =~ ^[0-9]+$ ]] && break
-                echo "Enter a number." >&2
-            done
-        fi
-    fi
+    [[ -z "$USER_PORT" ]] && USER_PORT="$(ask_number "Server port" 8000 1 65535)"
     [[ "$USER_PORT" =~ ^[0-9]+$ ]] || error "Invalid --port: $USER_PORT"
 
     USER_GPU="${CLI_GPU:-}"
     local gpu_def
     gpu_def="$(gpu_layers_default)"
-    if [[ -z "$USER_GPU" ]]; then
-        if [[ "$ASSUME_YES" -eq 1 ]]; then
-            USER_GPU="$gpu_def"
-        else
-            while true; do
-                local _g
-                read -rp "? GPU layers to offload [$gpu_def]: " _g
-                USER_GPU="${_g:-$gpu_def}"
-                [[ "$USER_GPU" =~ ^[0-9]+$ ]] && break
-                echo "Enter a number." >&2
-            done
-        fi
-    fi
+    [[ -z "$USER_GPU" ]] && USER_GPU="$(ask_number "GPU layers to offload" "$gpu_def" 0 999)"
     [[ "$USER_GPU" =~ ^[0-9]+$ ]] || error "Invalid --gpu-layers: $USER_GPU"
 
     EXTRA_ARGS="${CLI_EXTRA:-}"
     if [[ -z "$EXTRA_ARGS" && "$ASSUME_YES" -ne 1 ]]; then
-        EXTRA_ARGS="$(ask 'Extra llama-server args (blank for none):')"
+        EXTRA_ARGS="$(ask_string "Extra llama-server args" "")"
     fi
+    return 0
 }
 
-# ---------- config + launcher ----------
+# ════════════════════════════════════════════════════════════════════
+#  Config & launcher
+# ════════════════════════════════════════════════════════════════════
 write_config() {
-    info "=== Writing config $CONFIG_FILE ==="
+    step "Writing config"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        info "[dry-run] would write USE_CASE=$USE_CASE MODEL_ID=$MODEL_ID PORT=$USER_PORT CTX=$USER_CTX GPU=$USER_GPU"
+        info "[dry-run] would write: $CONFIG_FILE"
         return
     fi
     {
@@ -893,13 +1020,13 @@ write_config() {
         echo "GPU_BACKEND=\"$GPU_BACKEND\""
         echo "LLAMA_BUILD_DIR=\"${SHARE_DIR}/bin\""
     } > "$CONFIG_FILE"
-    info "Config saved → $CONFIG_FILE"
+    ok "Wrote $CONFIG_FILE"
 }
 
 generate_launcher() {
-    info "=== Creating launcher $LAUNCHER_SCRIPT ==="
+    step "Generating launcher"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        info "[dry-run] would write launcher"
+        info "[dry-run] would write: $LAUNCHER_SCRIPT"
         return
     fi
     mkdir -p "$BIN_DIR"
@@ -950,13 +1077,20 @@ LAUNCHER_EOF
         "$LAUNCHER_SCRIPT"
     rm -f "${LAUNCHER_SCRIPT}.bak"
     chmod +x "$LAUNCHER_SCRIPT"
-    info "Launcher created: $LAUNCHER_SCRIPT"
+
+    # Lint the generated launcher
+    if ! bash -n "$LAUNCHER_SCRIPT"; then
+        error "Generated launcher failed bash syntax check (this is a bug — file an issue)"
+    fi
+    ok "Wrote $LAUNCHER_SCRIPT"
 }
 
-# ---------- health probe ----------
+# ════════════════════════════════════════════════════════════════════
+#  Health probe
+# ════════════════════════════════════════════════════════════════════
 do_health_check() {
-    info "=== Health probe ==="
-    [[ -x "$LAUNCHER_SCRIPT" ]] || error "No launcher found at $LAUNCHER_SCRIPT (install first)"
+    step "Health probe"
+    [[ -x "$LAUNCHER_SCRIPT" ]] || error "No launcher at $LAUNCHER_SCRIPT (install first)"
     local port=8000
     if [[ -f "$CONFIG_FILE" ]]; then
         # shellcheck source=/dev/null
@@ -975,7 +1109,7 @@ do_health_check() {
     local _
     for _ in $(seq 1 30); do
         if curl -sf --connect-timeout 2 "$url" >/dev/null 2>&1; then
-            info "✓ Server healthy at $url"
+            ok "Server healthy at $url"
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
             return 0
@@ -991,16 +1125,47 @@ do_health_check() {
     error "Health check timed out after 60 s. See $log"
 }
 
-# ---------- main ----------
+# ════════════════════════════════════════════════════════════════════
+#  Summary
+# ════════════════════════════════════════════════════════════════════
+print_summary() {
+    local title="Setup complete"
+    local bar=""
+    printf -v bar '═%.0s' $(seq 1 60)
+    printf "\n${C_BGREEN}%s${C_RESET}\n" "$bar" >&2
+    printf "${C_BGREEN}  %s${C_RESET}\n" "$title" >&2
+    printf "${C_BGREEN}%s${C_RESET}\n" "$bar" >&2
+    cat >&2 <<EOF
+
+  ${C_BOLD}Platform${C_RESET}      ${OS}/${ARCH} (${GPU_BACKEND})
+  ${C_BOLD}RAM/cores${C_RESET}     ${MEM_GB} GB / ${PHYS_CORES}
+  ${C_BOLD}Binary${C_RESET}        ${LLAMA_SERVER_PATH:-<dry-run>}
+  ${C_BOLD}Model${C_RESET}         ${MODEL_GGUF:-<not downloaded>}
+  ${C_BOLD}Context${C_RESET}       ${USER_CTX}
+  ${C_BOLD}GPU layers${C_RESET}    ${USER_GPU}
+  ${C_BOLD}Port${C_RESET}          ${USER_PORT}
+  ${C_BOLD}Extra args${C_RESET}    ${EXTRA_ARGS:-<none>}
+
+  ${C_BOLD}Config${C_RESET}        ${CONFIG_FILE}
+  ${C_BOLD}Launcher${C_RESET}      ${LAUNCHER_SCRIPT}
+
+EOF
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *) hint "$BIN_DIR isn't on your PATH — add it to use 'llm-server' directly" ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════════════
+#  Main
+# ════════════════════════════════════════════════════════════════════
 main() {
-    [[ "$UNINSTALL" -eq 1 ]] && do_uninstall
+    [[ "$UNINSTALL" -eq 1 ]]   && do_uninstall
     [[ "$HEALTH_CHECK" -eq 1 ]] && { do_health_check; exit 0; }
 
     detect_platform
-    check_tools
+    preflight
     ensure_hf_cli
-
-    run mkdir -p "$BIN_DIR" "$MODEL_DIR" "$SHARE_DIR"
 
     run_setup_wizard
     choose_binary_method
@@ -1009,7 +1174,7 @@ main() {
     if [[ -n "${MODEL_ID:-}" ]]; then
         if [[ -f "$MODEL_ID" ]]; then
             MODEL_GGUF="$MODEL_ID"
-            info "Using local model: $MODEL_GGUF"
+            ok "Using local model: $MODEL_GGUF"
         else
             MODEL_GGUF="$(download_model "$MODEL_ID" "$MODEL_DIR")"
         fi
@@ -1019,31 +1184,13 @@ main() {
 
     write_config
     generate_launcher
+    print_summary
 
-    info "=== Setup complete ==="
-    cat >&2 <<EOF
-
-  Platform           : $OS/$ARCH ($GPU_BACKEND)
-  RAM / cores        : ${MEM_GB} GB / $PHYS_CORES
-  llama-server       : ${LLAMA_SERVER_PATH:-<dry-run>}
-  Model              : ${MODEL_GGUF:-<not downloaded>}
-  Context            : $USER_CTX
-  GPU layers         : $USER_GPU
-  Port               : $USER_PORT
-  Config             : $CONFIG_FILE
-  Launcher           : $LAUNCHER_SCRIPT
-
-EOF
-    case ":$PATH:" in
-        *":$BIN_DIR:"*) ;;
-        *) info "Tip: add $BIN_DIR to your PATH to run 'llm-server' directly." ;;
-    esac
-
-    if [[ "$ASSUME_YES" -ne 1 ]] && [[ "$DRY_RUN" -ne 1 ]] && confirm "Start server now?"; then
+    if [[ "$ASSUME_YES" -ne 1 ]] && [[ "$DRY_RUN" -ne 1 ]] && ask_yn "Start the server now?" "Y"; then
         info "Launching $LAUNCHER_SCRIPT"
         exec "$LAUNCHER_SCRIPT"
     else
-        info "Done. Run '$LAUNCHER_SCRIPT' to start the server."
+        info "Run ${C_BOLD}$LAUNCHER_SCRIPT${C_RESET} to start the server"
     fi
 }
 
