@@ -622,18 +622,23 @@ fits_under() {
 
 show_recommendations() {
     info "=== Recommendations for ${MEM_GB} GB / ${PHYS_CORES} cores ==="
+    info "    (reserving ~50% of RAM for KV cache, context shifts, OS)"
     local entries=(
         "bartowski/Qwen2.5-7B-Instruct-GGUF:4.5"
         "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:4.8"
         "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:5.5"
         "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF:40.0"
     )
+    # Thresholds are fraction of RAM the model itself occupies.
+    # < 0.5 = lots of room for KV at long context.
+    # < 0.8 = fits but only with q8_0 KV and/or shorter context.
+    # else  = won't fit usefully.
     for entry in "${entries[@]}"; do
         local name="${entry%%:*}" gb="${entry##*:}"
-        if fits_under "$gb" 1.2; then
-            echo "  [OK]    $name (~${gb} GB) — fits comfortably"
-        elif fits_under "$gb" 1.5; then
-            echo "  [TIGHT] $name (~${gb} GB) — tight on ${MEM_GB} GB"
+        if fits_under "$gb" 0.5; then
+            echo "  [OK]    $name (~${gb} GB) — fits with room for long context"
+        elif fits_under "$gb" 0.8; then
+            echo "  [TIGHT] $name (~${gb} GB) — fits but needs q8_0 KV / shorter ctx"
         else
             echo "  [BIG]   $name (~${gb} GB) — too large for ${MEM_GB} GB"
         fi
