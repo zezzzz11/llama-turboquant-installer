@@ -361,11 +361,12 @@ tune_for_model() {
 
     # FlashAttention: big speed/memory win on Metal & CUDA at long context.
     # Skipped on CPU/Vulkan/HIP where support is partial or slower.
+    # NB: recent llama-server requires a value ('on'|'off'|'auto'), not a bare flag.
     case "$GPU_BACKEND" in
         metal|cuda)
             if [[ "${EXTRA_ARGS:-}" != *flash-attn* ]]; then
-                info "  Enabling --flash-attn ($GPU_BACKEND backend)"
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--flash-attn"
+                info "  Enabling --flash-attn on ($GPU_BACKEND backend)"
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--flash-attn on"
             fi
             ;;
     esac
