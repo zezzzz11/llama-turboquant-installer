@@ -61,6 +61,9 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 --port <int>              llama-server port (default 8000)
 --context <int>           context length, tokens
 --gpu-layers <int>        layers to offload (default 99 w/GPU, 0 w/CPU)
+--idle-sleep-seconds <n>  llama-server sleep after n idle seconds (-1 disables)
+--idle-shutdown-seconds <n>
+                          stop server after n idle seconds (0 disables)
 --extra-args <str>        passed through to llama-server
 --yes, -y                 non-interactive; accept defaults
 --resume                  reuse existing ~/.llm-server.env
@@ -101,6 +104,15 @@ On Metal and CUDA backends, `--flash-attn` is also added automatically — large
 `--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct and agent models (Qwen, Hermes, Gemma, Llama 3.1+, etc.).
 
 Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
+
+### Idle behavior
+
+The launcher can reduce idle resource use in two stages:
+
+- `--idle-sleep-seconds 300` passes `--sleep-idle-seconds 300` to `llama-server`, letting it sleep after five idle minutes.
+- `--idle-shutdown-seconds 1800` wraps `llama-server`, watches `/slots`, and stops the process after 30 idle minutes so RAM/VRAM can be released.
+
+Use `0` to disable idle shutdown and `-1` to disable llama-server sleep.
 
 ### Safety checks
 

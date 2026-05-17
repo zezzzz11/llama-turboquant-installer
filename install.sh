@@ -197,6 +197,8 @@ CLI_PORT=""
 CLI_CONTEXT=""
 CLI_GPU=""
 CLI_EXTRA=""
+CLI_IDLE_SLEEP=""
+CLI_IDLE_SHUTDOWN=""
 
 usage() {
     cat <<USAGE
@@ -210,6 +212,9 @@ ${C_BOLD}Options:${C_RESET}
   --port <int>              llama-server port (default 8000)
   --context <int>           context length in tokens
   --gpu-layers <int>        layers to offload to GPU
+  --idle-sleep-seconds <n>  llama-server sleep after n idle seconds (-1 disables)
+  --idle-shutdown-seconds <n>
+                            stop server after n idle seconds (0 disables)
   --extra-args <str>        appended to the llama-server invocation
   --yes, -y                 non-interactive; accept defaults
   --resume                  reuse existing ~/.llm-server.env without asking
@@ -234,6 +239,8 @@ while [[ $# -gt 0 ]]; do
         --port)         CLI_PORT="${2:?--port requires value}"; shift 2 ;;
         --context)      CLI_CONTEXT="${2:?--context requires value}"; shift 2 ;;
         --gpu-layers)   CLI_GPU="${2:?--gpu-layers requires value}"; shift 2 ;;
+        --idle-sleep-seconds)    CLI_IDLE_SLEEP="${2:?--idle-sleep-seconds requires value}"; shift 2 ;;
+        --idle-shutdown-seconds) CLI_IDLE_SHUTDOWN="${2:?--idle-shutdown-seconds requires value}"; shift 2 ;;
         --extra-args)   CLI_EXTRA="${2:?--extra-args requires value}"; shift 2 ;;
         --yes|-y)       ASSUME_YES=1; shift ;;
         --resume)       RESUME=1; shift ;;
@@ -1007,6 +1014,10 @@ maybe_resume() {
     [[ -n "$CLI_CONTEXT"  ]] && USER_CTX="$CLI_CONTEXT"
     [[ -n "$CLI_GPU"      ]] && USER_GPU="$CLI_GPU"
     [[ -n "$CLI_EXTRA"    ]] && EXTRA_ARGS="$CLI_EXTRA"
+    IDLE_SLEEP_SECONDS="${IDLE_SLEEP_SECONDS:-300}"
+    IDLE_SHUTDOWN_SECONDS="${IDLE_SHUTDOWN_SECONDS:-0}"
+    [[ -n "$CLI_IDLE_SLEEP"    ]] && IDLE_SLEEP_SECONDS="$CLI_IDLE_SLEEP"
+    [[ -n "$CLI_IDLE_SHUTDOWN" ]] && IDLE_SHUTDOWN_SECONDS="$CLI_IDLE_SHUTDOWN"
     return 0
 }
 
@@ -1062,6 +1073,15 @@ run_setup_wizard() {
     [[ -z "$USER_GPU" ]] && USER_GPU="$(ask_number "GPU layers to offload" "$gpu_def" 0 999)"
     [[ "$USER_GPU" =~ ^[0-9]+$ ]] || error "Invalid --gpu-layers: $USER_GPU"
 
+    IDLE_SLEEP_SECONDS="${CLI_IDLE_SLEEP:-}"
+    [[ -z "$IDLE_SLEEP_SECONDS" ]] && IDLE_SLEEP_SECONDS="$(ask_string "Sleep after idle seconds (-1 disables)" 300)"
+    [[ "$IDLE_SLEEP_SECONDS" =~ ^-?[0-9]+$ ]] || error "Invalid --idle-sleep-seconds: $IDLE_SLEEP_SECONDS"
+    (( IDLE_SLEEP_SECONDS >= -1 && IDLE_SLEEP_SECONDS <= 86400 )) || error "--idle-sleep-seconds must be between -1 and 86400"
+
+    IDLE_SHUTDOWN_SECONDS="${CLI_IDLE_SHUTDOWN:-}"
+    [[ -z "$IDLE_SHUTDOWN_SECONDS" ]] && IDLE_SHUTDOWN_SECONDS="$(ask_number "Shutdown after idle seconds (0 disables)" 0 0 604800)"
+    [[ "$IDLE_SHUTDOWN_SECONDS" =~ ^[0-9]+$ ]] || error "Invalid --idle-shutdown-seconds: $IDLE_SHUTDOWN_SECONDS"
+
     EXTRA_ARGS="${CLI_EXTRA:-}"
     if [[ -z "$EXTRA_ARGS" && "$ASSUME_YES" -ne 1 ]]; then
         EXTRA_ARGS="$(ask_string "Extra llama-server args" "")"
@@ -1083,6 +1103,8 @@ write_config() {
         echo "USE_CASE=\"$USE_CASE\""
         echo "MODEL_ID=\"$MODEL_ID\""
         echo "GPU_LAYERS=\"$USER_GPU\""
+        echo "IDLE_SLEEP_SECONDS=\"$IDLE_SLEEP_SECONDS\""
+        echo "IDLE_SHUTDOWN_SECONDS=\"$IDLE_SHUTDOWN_SECONDS\""
         echo "EXTRA_ARGS=\"$EXTRA_ARGS\""
         echo "LLM_PORT=\"$USER_PORT\""
         echo "LLM_CONTEXT=\"$USER_CTX\""
@@ -1114,6 +1136,8 @@ PORT="${LLM_PORT:-8000}"
 CTX="${LLM_CONTEXT:-65536}"
 GPU="${GPU_LAYERS:-99}"
 THREADS="${LL_THREADS:-2}"
+IDLE_SLEEP="${IDLE_SLEEP_SECONDS:-300}"
+IDLE_SHUTDOWN="${IDLE_SHUTDOWN_SECONDS:-0}"
 
 if [[ ! -f "$MODEL" ]]; then
     echo "Model file not found: $MODEL" >&2
@@ -1131,14 +1155,83 @@ echo "  Context : $CTX"
 echo "  GPU     : $GPU layers"
 echo "  Port    : $PORT"
 echo "  Threads : $THREADS"
+echo "  Sleep   : ${IDLE_SLEEP}s idle (-1 disables)"
+echo "  Stop    : ${IDLE_SHUTDOWN}s idle (0 disables)"
 
-exec "$LLAMA_SERVER" \
+args=(
     -m "$MODEL" \
     -c "$CTX" \
     --n-gpu-layers "$GPU" \
     -t "$THREADS" \
-    --port "$PORT" \
-    ${EXTRA_ARGS:-}
+    --port "$PORT"
+)
+
+if [[ "$IDLE_SLEEP" =~ ^-?[0-9]+$ ]] && (( IDLE_SLEEP >= 0 )) && [[ "${EXTRA_ARGS:-}" != *--sleep-idle-seconds* ]]; then
+    args+=(--sleep-idle-seconds "$IDLE_SLEEP")
+fi
+
+if [[ -n "${EXTRA_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    extra_args=( ${EXTRA_ARGS} )
+    args+=("${extra_args[@]}")
+fi
+
+slot_busy_or_unknown() {
+    local body
+    body="$(curl -sf --max-time 2 "http://127.0.0.1:${PORT}/slots" 2>/dev/null || true)"
+    [[ -n "$body" ]] || return 0
+
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    slots = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(slots, list):
+    sys.exit(0)
+busy = any(bool(slot.get("is_processing")) for slot in slots if isinstance(slot, dict))
+sys.exit(0 if busy else 1)
+' && return 0 || return 1
+    fi
+
+    printf '%s' "$body" | grep -q '"is_processing"[[:space:]]*:[[:space:]]*true'
+}
+
+if [[ "$IDLE_SHUTDOWN" =~ ^[0-9]+$ ]] && (( IDLE_SHUTDOWN > 0 )); then
+    "$LLAMA_SERVER" "${args[@]}" &
+    server_pid=$!
+    last_active="$(date +%s)"
+
+    cleanup() {
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    }
+    trap cleanup INT TERM EXIT
+
+    while kill -0 "$server_pid" 2>/dev/null; do
+        sleep 15
+        if slot_busy_or_unknown; then
+            last_active="$(date +%s)"
+            continue
+        fi
+        now="$(date +%s)"
+        if (( now - last_active >= IDLE_SHUTDOWN )); then
+            echo "Idle shutdown after ${IDLE_SHUTDOWN}s; stopping llama-server"
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+            trap - INT TERM EXIT
+            exit 0
+        fi
+    done
+
+    wait "$server_pid"
+    status=$?
+    trap - INT TERM EXIT
+    exit "$status"
+fi
+
+exec "$LLAMA_SERVER" "${args[@]}"
 LAUNCHER_EOF
 
     sed -i.bak \
@@ -1214,6 +1307,8 @@ print_summary() {
   ${C_BOLD}Context${C_RESET}       ${USER_CTX}
   ${C_BOLD}GPU layers${C_RESET}    ${USER_GPU}
   ${C_BOLD}Port${C_RESET}          ${USER_PORT}
+  ${C_BOLD}Idle sleep${C_RESET}    ${IDLE_SLEEP_SECONDS}s (-1 disables)
+  ${C_BOLD}Idle stop${C_RESET}     ${IDLE_SHUTDOWN_SECONDS}s (0 disables)
   ${C_BOLD}Extra args${C_RESET}    ${EXTRA_ARGS:-<none>}
 
   ${C_BOLD}Config${C_RESET}        ${CONFIG_FILE}
