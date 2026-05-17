@@ -46,6 +46,8 @@ RESUME=0
 UNINSTALL=0
 DRY_RUN=0
 HEALTH_CHECK=0
+REINSTALL=0
+REDOWNLOAD=0
 CLI_USE_CASE=""
 CLI_MODEL=""
 CLI_PORT=""
@@ -71,6 +73,8 @@ Options:
   --uninstall               remove installed files and exit
   --dry-run                 print actions without executing
   --health-check            start the launcher, poll /health, then stop (smoke test)
+  --reinstall               force re-install of llama-server (ignore existing binaries)
+  --redownload              force re-download of the model even if the file is present
   -h, --help                show this help
 
 Examples:
@@ -93,6 +97,8 @@ while [[ $# -gt 0 ]]; do
         --uninstall)   UNINSTALL=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
         --health-check) HEALTH_CHECK=1; shift ;;
+        --reinstall)   REINSTALL=1; shift ;;
+        --redownload)  REDOWNLOAD=1; shift ;;
         -h|--help)     usage; exit 0 ;;
         *) error "Unknown flag: $1 (try --help)" ;;
     esac
@@ -482,6 +488,26 @@ download_model() {
             | { grep -m1 -i 'Q4_K_M' || head -n1; })"
     fi
 
+    # If the target file is already on disk, decide whether to reuse or re-download
+    if [[ -n "$pick" && -f "${dest}/${pick}" ]]; then
+        if [[ "$REDOWNLOAD" -eq 1 ]]; then
+            info "  --redownload: removing existing ${pick}"
+            run rm -f "${dest}/${pick}"
+        elif [[ "$ASSUME_YES" -eq 1 ]]; then
+            info "Model already present at ${dest}/${pick} — reusing (pass --redownload to refresh)"
+            echo "${dest}/${pick}"
+            return 0
+        else
+            echo "Model already present: ${dest}/${pick}" >&2
+            if confirm "Reuse it and skip the download?"; then
+                echo "${dest}/${pick}"
+                return 0
+            fi
+            info "Re-downloading"
+            run rm -f "${dest}/${pick}"
+        fi
+    fi
+
     if command -v huggingface-cli &>/dev/null; then
         local include_args=()
         if [[ -n "$pick" ]]; then
@@ -582,38 +608,73 @@ build_from_source() {
     info "Binaries placed in ${SHARE_DIR}/bin"
 }
 
-get_llama_server_path() {
-    if [[ -x "${SHARE_DIR}/bin/llama-server" ]]; then
-        echo "${SHARE_DIR}/bin/llama-server"; return
-    fi
-    local hb
-    hb="$(command -v llama-server 2>/dev/null || true)"
-    [[ -n "$hb" ]] && { echo "$hb"; return; }
-    echo ""
-}
-
 choose_binary_method() {
-    LLAMA_SERVER_PATH="$(get_llama_server_path)"
-    if [[ -n "$LLAMA_SERVER_PATH" ]]; then
-        info "Found existing llama-server: $LLAMA_SERVER_PATH"
+    local local_bin="${SHARE_DIR}/bin/llama-server"
+    local sys_bin
+    sys_bin="$(command -v llama-server 2>/dev/null || true)"
+    # If our own copy is also on PATH, don't double-count it
+    [[ "$sys_bin" == "$local_bin" ]] && sys_bin=""
+
+    if [[ "$REINSTALL" -eq 1 ]]; then
+        info "--reinstall: removing existing installer binaries"
+        run rm -rf "${SHARE_DIR}/bin" "${SRC_DIR}/build"
+        [[ -x "$local_bin" ]] || local_bin=""
+    fi
+
+    # Already have our own — done.
+    if [[ -x "$local_bin" ]]; then
+        LLAMA_SERVER_PATH="$local_bin"
+        info "Found installer-owned llama-server: $LLAMA_SERVER_PATH"
         return 0
     fi
-    if [[ "$ASSUME_YES" -eq 1 ]]; then
-        install_prebuilt || build_from_source
-    else
-        echo "Obtain llama-cpp-turboquant:" >&2
-        echo "  1) Prebuilt (fall back to source if unavailable) [default]" >&2
-        echo "  2) Build from source" >&2
+
+    # System binary present — ask, don't silently use it.
+    if [[ -n "$sys_bin" ]]; then
+        if [[ "$ASSUME_YES" -eq 1 ]]; then
+            warn "System llama-server at $sys_bin will be used (likely plain llama.cpp, not TurboQuant)."
+            warn "Pass --reinstall to install TurboQuant instead."
+            LLAMA_SERVER_PATH="$sys_bin"
+            return 0
+        fi
+        echo "Found existing llama-server on PATH: $sys_bin" >&2
+        echo "  This is probably plain llama.cpp (Homebrew, etc.), not the TurboQuant fork." >&2
+        echo "Options:" >&2
+        echo "  1) Use it as-is (no TurboQuant quants)" >&2
+        echo "  2) Install TurboQuant prebuilt into ${SHARE_DIR}/bin (recommended) [default]" >&2
+        echo "  3) Build TurboQuant from source" >&2
         local c
-        read -rp "? Choose [1-2, default 1]: " c
-        c="${c:-1}"
+        read -rp "? Choose [1-3, default 2]: " c
+        c="${c:-2}"
         case "$c" in
-            1) install_prebuilt || build_from_source ;;
-            2) build_from_source ;;
+            1) LLAMA_SERVER_PATH="$sys_bin" ;;
+            2) install_prebuilt || build_from_source ;;
+            3) build_from_source ;;
             *) error "Invalid selection" ;;
         esac
+    else
+        # Nothing on disk — install.
+        if [[ "$ASSUME_YES" -eq 1 ]]; then
+            install_prebuilt || build_from_source
+        else
+            echo "No llama-server found. Install via:" >&2
+            echo "  1) Prebuilt (fall back to source if unavailable) [default]" >&2
+            echo "  2) Build from source" >&2
+            local c
+            read -rp "? Choose [1-2, default 1]: " c
+            c="${c:-1}"
+            case "$c" in
+                1) install_prebuilt || build_from_source ;;
+                2) build_from_source ;;
+                *) error "Invalid selection" ;;
+            esac
+        fi
     fi
-    LLAMA_SERVER_PATH="$(get_llama_server_path)"
+
+    if [[ -z "${LLAMA_SERVER_PATH:-}" ]]; then
+        if [[ -x "$local_bin" ]]; then LLAMA_SERVER_PATH="$local_bin"
+        else                           LLAMA_SERVER_PATH="$sys_bin"
+        fi
+    fi
     if [[ -z "$LLAMA_SERVER_PATH" && "${DRY_RUN:-0}" -ne 1 ]]; then
         error "llama-server not found after install/build"
     fi
