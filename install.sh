@@ -714,8 +714,8 @@ do_health_check() {
     trap '[[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true' EXIT
 
     info "Polling $url (60s timeout)"
-    local i
-    for i in $(seq 1 30); do
+    local _
+    for _ in $(seq 1 30); do
         if curl -sf --connect-timeout 2 "$url" >/dev/null 2>&1; then
             info "✓ Server healthy at $url"
             kill "$pid" 2>/dev/null || true
