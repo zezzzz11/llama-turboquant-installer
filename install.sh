@@ -572,12 +572,21 @@ install_prebuilt() {
         rm -f "$tmp"
         return 1
     fi
-    run mkdir -p "${SHARE_DIR}/bin"
-    run tar -xzf "$tmp" -C "$SHARE_DIR"
+    # Extract into a staging dir, then consolidate binaries + dylibs +
+    # symlinks (the binary uses @rpath/lib<x>.0.dylib which is a symlink to
+    # the versioned file — both must end up in the same directory).
+    local stage
+    stage="$(mktemp -d "${SHARE_DIR}/.stage.XXXXXX")"
+    run tar -xzf "$tmp" -C "$stage"
     rm -f "$tmp"
-    find "$SHARE_DIR" -maxdepth 3 -type f -name 'llama-*' \
-        ! -path "${SHARE_DIR}/bin/*" \
+    run mkdir -p "${SHARE_DIR}/bin"
+    # No -type filter: -name matches files AND symlinks, which is what we
+    # want for the lib<x>.0.dylib symlinks. mv preserves symlinks (doesn't
+    # dereference). All targets are relative names within the same dir.
+    find "$stage" -mindepth 1 \
+        \( -name 'llama-*' -o -name '*.dylib' -o -name '*.so' -o -name '*.metal' \) \
         -exec mv {} "${SHARE_DIR}/bin/" \; 2>/dev/null || true
+    rm -rf "$stage"
     info "Installed to ${SHARE_DIR}/bin"
     return 0
 }
