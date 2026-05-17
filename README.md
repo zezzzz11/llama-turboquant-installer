@@ -66,10 +66,19 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 --resume                  reuse existing ~/.llm-server.env
 --uninstall               remove installed files and exit
 --dry-run                 print actions without executing
+--health-check            start the launcher, poll /health, then stop (smoke test)
 -h, --help
 ```
 
 The installer writes a config file you can edit later; rerunning with `--resume` picks it up.
+
+### Safety checks
+
+- **Disk space**: before downloading, the installer queries the file size from the Hugging Face tree API and checks `df` — aborts with a clear message if there isn't ~10% headroom.
+- **SHA256**: when using the curl fallback (no `huggingface-cli` installed), the installer verifies the downloaded GGUF against the `lfs.oid` reported by the HF API. `huggingface-cli` performs this check internally.
+- **Health probe**: `install.sh --health-check` starts the launcher in the background, polls `/health` (60 s timeout), then shuts it down. Useful as a smoke test post-install or in CI.
+
+(Pre-check and sha256 verification require `python3`, which is shipped on macOS and standard on Linux distros. If absent, the installer falls back to a regex-based file pick and skips verification with a warning.)
 
 ## Uninstall
 

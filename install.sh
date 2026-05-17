@@ -45,6 +45,7 @@ ASSUME_YES=0
 RESUME=0
 UNINSTALL=0
 DRY_RUN=0
+HEALTH_CHECK=0
 CLI_USE_CASE=""
 CLI_MODEL=""
 CLI_PORT=""
@@ -69,6 +70,7 @@ Options:
   --resume                  reuse existing ~/.llm-server.env without asking
   --uninstall               remove installed files and exit
   --dry-run                 print actions without executing
+  --health-check            start the launcher, poll /health, then stop (smoke test)
   -h, --help                show this help
 
 Examples:
@@ -90,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --resume)      RESUME=1; shift ;;
         --uninstall)   UNINSTALL=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
+        --health-check) HEALTH_CHECK=1; shift ;;
         -h|--help)     usage; exit 0 ;;
         *) error "Unknown flag: $1 (try --help)" ;;
     esac
@@ -186,7 +189,11 @@ check_tools() {
         for t in "${missing[@]}"; do
             echo "  • $t — $(pkg_hint "$t")" >&2
         done
-        error "Install the missing prerequisites and re-run."
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            warn "Dry-run: continuing despite missing tools."
+        else
+            error "Install the missing prerequisites and re-run."
+        fi
     fi
 }
 
@@ -196,6 +203,77 @@ ensure_hf_cli() {
     pip3 install --user "huggingface_hub[cli]" 2>/dev/null \
         || python3 -m pip install --user "huggingface_hub[cli]" 2>/dev/null \
         || warn "Could not install huggingface-cli; will use curl fallback."
+}
+
+# ---------- HF API helpers ----------
+_hf_pick_gguf() {
+    # Read tree JSON from stdin, echo the best GGUF filename.
+    # Prefers Q4_K_M > Q5_K_M > shortest-name GGUF.
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+ggufs = [f["path"] for f in data if isinstance(f, dict) and f.get("path","").lower().endswith(".gguf")]
+def rank(p):
+    pl = p.lower()
+    return (0 if "q4_k_m" in pl else 1 if "q5_k_m" in pl else 2, len(p))
+if ggufs:
+    ggufs.sort(key=rank)
+    print(ggufs[0])
+'
+}
+
+_hf_field() {
+    # _hf_field <path> {size|sha} — reads tree JSON from stdin
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+path, what = sys.argv[1], sys.argv[2]
+for f in data:
+    if isinstance(f, dict) and f.get("path") == path:
+        if what == "size":
+            print(f.get("size") or (f.get("lfs") or {}).get("size") or 0)
+        elif what == "sha":
+            print((f.get("lfs") or {}).get("oid", ""))
+        break
+' "$1" "$2"
+}
+
+check_disk_space() {
+    local dest="$1" need_bytes="$2"
+    [[ "${need_bytes:-0}" -gt 0 ]] || return 0
+    local free_kb need_kb
+    free_kb="$(df -k "$dest" 2>/dev/null | awk 'NR==2 {print $4}')"
+    [[ -z "$free_kb" ]] && { warn "Could not determine free disk space at $dest"; return 0; }
+    need_kb=$(( need_bytes / 1024 * 11 / 10 ))   # +10% margin
+    if (( free_kb < need_kb )); then
+        error "Insufficient disk space at $dest: $(( free_kb / 1024 )) MB free, need ~$(( need_kb / 1024 )) MB"
+    fi
+    info "Disk space OK: $(( free_kb / 1024 )) MB free, need ~$(( need_kb / 1024 )) MB"
+}
+
+verify_sha256() {
+    local file="$1" expected="$2"
+    if [[ -z "$expected" ]]; then
+        warn "No sha256 from HF API; skipping verification"
+        return 0
+    fi
+    local cmd=""
+    if command -v sha256sum &>/dev/null; then cmd="sha256sum"
+    elif command -v shasum &>/dev/null; then cmd="shasum -a 256"
+    else warn "No sha256 tool found; skipping verification"; return 0; fi
+    info "Verifying sha256…"
+    local got
+    got="$($cmd "$file" | awk '{print $1}')"
+    if [[ "$got" != "$expected" ]]; then
+        error "sha256 mismatch on $file: expected $expected, got $got"
+    fi
+    info "sha256 OK"
 }
 
 # ---------- model download ----------
@@ -209,30 +287,43 @@ download_model() {
         return 0
     fi
 
+    # Use the HF tree API for size pre-check, sha256, and (for the curl path) file pick.
+    local tree="" pick="" expected_sha="" expected_size=0
+    tree="$(curl -sfL "https://huggingface.co/api/models/${model_id}/tree/main" 2>/dev/null || true)"
+    if [[ -n "$tree" ]] && command -v python3 &>/dev/null; then
+        pick="$(printf '%s' "$tree" | _hf_pick_gguf)"
+        if [[ -n "$pick" ]]; then
+            expected_sha="$(printf '%s' "$tree" | _hf_field "$pick" sha)"
+            expected_size="$(printf '%s' "$tree" | _hf_field "$pick" size)"
+            check_disk_space "$dest" "${expected_size:-0}"
+        fi
+    fi
+
     if command -v huggingface-cli &>/dev/null; then
-        info "→ huggingface-cli"
+        info "→ huggingface-cli (verifies LFS sha256 internally)"
         huggingface-cli download "$model_id" \
             --local-dir "$dest" --resume-download >/dev/null \
             || error "huggingface-cli download failed for $model_id"
     else
         info "→ HF API fallback"
-        local api="https://huggingface.co/api/models/${model_id}"
-        local listing
-        listing="$(curl -sfL "$api")" || error "Cannot reach HF API for $model_id"
-        local files
-        files="$(printf '%s' "$listing" \
-            | grep -oE '"rfilename"[[:space:]]*:[[:space:]]*"[^"]*\.gguf"' \
-            | sed -E 's/.*"([^"]+)"$/\1/')"
-        [[ -z "$files" ]] && error "No GGUF files listed in $model_id"
+        if [[ -z "$tree" ]]; then
+            error "Cannot reach HF API for $model_id"
+        fi
+        if [[ -z "$pick" ]]; then
+            # Fall back to regex listing if python3 wasn't available
+            pick="$(printf '%s' "$tree" \
+                | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]*\.gguf"' \
+                | sed -E 's/.*"([^"]+)"$/\1/' \
+                | { grep -m1 -i 'Q4_K_M' || true; } \
+                | head -n1)"
+        fi
+        [[ -z "$pick" ]] && error "No GGUF files in $model_id"
 
-        local pick
-        pick="$(printf '%s\n' "$files" | grep -m1 -i 'Q4_K_M' || true)"
-        [[ -z "$pick" ]] && pick="$(printf '%s\n' "$files" | grep -m1 -i 'Q5_K_M' || true)"
-        [[ -z "$pick" ]] && pick="$(printf '%s\n' "$files" | head -n1)"
         info "Downloading $pick"
         curl -fL "https://huggingface.co/${model_id}/resolve/main/${pick}" \
             -o "${dest}/$(basename "$pick")" \
             || error "Download failed for $pick"
+        verify_sha256 "${dest}/$(basename "$pick")" "$expected_sha"
     fi
 
     local gguf
@@ -604,9 +695,48 @@ LAUNCHER_EOF
     info "Launcher created: $LAUNCHER_SCRIPT"
 }
 
+# ---------- health probe ----------
+do_health_check() {
+    info "=== Health probe ==="
+    [[ -x "$LAUNCHER_SCRIPT" ]] || error "No launcher found at $LAUNCHER_SCRIPT (install first)"
+    local port=8000
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        . "$CONFIG_FILE"
+        port="${LLM_PORT:-8000}"
+    fi
+    local url="http://localhost:${port}/health"
+    local log="/tmp/llm-server-health.log"
+
+    info "Starting launcher in background (log: $log)"
+    "$LAUNCHER_SCRIPT" >"$log" 2>&1 &
+    local pid=$!
+    trap '[[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true' EXIT
+
+    info "Polling $url (60s timeout)"
+    local i
+    for i in $(seq 1 30); do
+        if curl -sf --connect-timeout 2 "$url" >/dev/null 2>&1; then
+            info "✓ Server healthy at $url"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            tail -n 30 "$log" >&2 || true
+            error "Server process exited before responding. See $log"
+        fi
+        sleep 2
+    done
+    kill "$pid" 2>/dev/null || true
+    tail -n 30 "$log" >&2 || true
+    error "Health check timed out after 60 s. See $log"
+}
+
 # ---------- main ----------
 main() {
     [[ "$UNINSTALL" -eq 1 ]] && do_uninstall
+    [[ "$HEALTH_CHECK" -eq 1 ]] && { do_health_check; exit 0; }
 
     detect_platform
     check_tools
