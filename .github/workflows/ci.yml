@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+        env:
+          SHELLCHECK_OPTS: -e SC1091
+
+  dry-run-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh --dry-run --yes (Linux/CPU)
+        run: ./install.sh --dry-run --yes --use-case 1
+
+  dry-run-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh --dry-run --yes (macOS/Metal)
+        run: ./install.sh --dry-run --yes --use-case 1

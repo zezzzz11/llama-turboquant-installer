@@ -27,8 +27,8 @@ Non-interactive:
 
 ```bash
 ./install.sh --yes \
-    --use-case 2 \
-    --model bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
+    --use-case 4 \
+    --model Qwen/Qwen3-8B-GGUF \
     --port 8000 --context 16384
 ```
 
@@ -56,20 +56,90 @@ Add `~/.local/bin` to your `PATH` to run `llm-server` directly.
 ## Flags
 
 ```
---use-case {1|2|3}        1=chat, 2=code, 3=research
+--use-case {1|2|3|4}      1=chat, 2=code, 3=research, 4=agents/tools
 --model <hf-repo-id>      Hugging Face GGUF repo
 --port <int>              llama-server port (default 8000)
 --context <int>           context length, tokens
 --gpu-layers <int>        layers to offload (default 99 w/GPU, 0 w/CPU)
+--idle-sleep-seconds <n>  llama-server sleep after n idle seconds (-1 disables)
+--idle-shutdown-seconds <n>
+                          stop server after n idle seconds (0 disables)
 --extra-args <str>        passed through to llama-server
 --yes, -y                 non-interactive; accept defaults
 --resume                  reuse existing ~/.llm-server.env
 --uninstall               remove installed files and exit
 --dry-run                 print actions without executing
+--health-check            start the launcher, poll /health, then stop (smoke test)
 -h, --help
 ```
 
 The installer writes a config file you can edit later; rerunning with `--resume` picks it up.
+
+### Model recommendations
+
+The default path is now tuned for local agent runners and OpenAI-compatible clients such as Agent0-style loops, OpenClaw, Hermes, Pi, and OpenCode. The interactive wizard shows a hardware-aware catalog with small, medium, MoE, Hermes, and large agent-tuned options, including:
+
+- `Qwen/Qwen3-8B-GGUF` for a fast default local agent baseline.
+- `bartowski/NousResearch_Hermes-4-14B-GGUF` for Hermes-style reasoning and tool use.
+- `Qwen/Qwen3-14B-GGUF` and `Qwen/Qwen3-30B-A3B-GGUF` for stronger planning and coding.
+- `ggml-org/gemma-4-26B-A4B-it-GGUF` for a Gemma MoE option used in local-agent docs.
+- `bartowski/Athene-V2-Agent-GGUF` for high-memory agent workloads.
+
+You can still pass any GGUF repository explicitly with `--model owner/repo`.
+
+### Context size and auto-tuning
+
+The default context is 65 536 tokens across all use cases — enough for most agentic workloads without allocating a model's full native maximum. After download the installer reads the GGUF's native context length from the file's metadata header and prints it as the model maximum, but your requested `--context` remains the cap. For example, a 262k-native model still runs at `--context 65536` unless you explicitly request `--context 262144`.
+
+KV cache memory is then estimated as:
+
+```
+KV bytes ≈ 2 × layers × kv_heads × head_dim × context × 2   # fp16
+```
+
+If projected KV exceeds ~40 % of system RAM, the installer automatically appends `--cache-type-k q8_0 --cache-type-v q8_0` to the launcher (halves cache size with negligible quality loss).
+
+On Metal and CUDA backends, `--flash-attn` is also added automatically — large speed and memory gains at long context. Skipped on CPU / Vulkan / HIP where support is partial.
+
+`--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct and agent models (Qwen, Hermes, Gemma, Llama 3.1+, etc.).
+
+Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
+
+On Apple Silicon, the launcher defaults generation/prompt-processing threads to the Performance-core count when macOS reports it, avoiding Efficiency-core synchronization slowdowns. Build jobs can still use the full physical core count.
+
+### Idle behavior
+
+The launcher can reduce idle resource use in two stages:
+
+- `--idle-sleep-seconds 300` passes `--sleep-idle-seconds 300` to `llama-server`, letting it sleep after five idle minutes.
+- `--idle-shutdown-seconds 1800` wraps `llama-server`, watches `/slots`, and stops the process after 30 idle minutes so RAM/VRAM can be released.
+
+Use `0` to disable idle shutdown and `-1` to disable llama-server sleep.
+
+### Suggested extra args
+
+The installer shows optional `llama-server` argument presets before the extra-args prompt. These are suggestions only; press Enter to skip them.
+
+- Agent API: `--parallel 1 --cache-reuse 256 --timeout 1200 --alias local-agent --no-webui`
+- Reasoning cap: `--parallel 1 --cache-reuse 256 --reasoning-budget 1024 --timeout 1200 --alias local-agent --no-webui`
+- Lower RAM: `--parallel 1 --cache-ram 4096 --no-webui`
+- LAN access: `--host 0.0.0.0 --api-key <key> --no-webui`
+
+Parallelism controls how many server slots can work concurrently:
+
+- `--parallel 1`: best for one local agent, lowest memory use, most predictable latency.
+- `--parallel 2`: useful for two clients or Web UI plus one agent; expect higher KV memory use.
+- `--parallel 4` or higher: use only for shared servers or concurrent users with plenty of RAM.
+
+Avoid `--tools all` unless every client that can reach the server is fully trusted.
+
+### Safety checks
+
+- **Disk space**: before downloading, the installer queries the file size from the Hugging Face tree API and checks `df` — aborts with a clear message if there isn't ~10% headroom.
+- **SHA256**: when using the curl fallback (no `huggingface-cli` installed), the installer verifies the downloaded GGUF against the `lfs.oid` reported by the HF API. `huggingface-cli` performs this check internally.
+- **Health probe**: `install.sh --health-check` starts the launcher in the background, polls `/health` (60 s timeout), then shuts it down. Useful as a smoke test post-install or in CI.
+
+(Pre-check and sha256 verification require `python3`, which is shipped on macOS and standard on Linux distros. If absent, the installer falls back to a regex-based file pick and skips verification with a warning.)
 
 ## Uninstall
 
