@@ -125,6 +125,12 @@ The installer shows optional `llama-server` argument presets before the extra-ar
 - Lower RAM: `--parallel 1 --cache-ram 4096 --no-webui`
 - LAN access: `--host 0.0.0.0 --api-key <key> --no-webui`
 
+Parallelism controls how many server slots can work concurrently:
+
+- `--parallel 1`: best for one local agent, lowest memory use, most predictable latency.
+- `--parallel 2`: useful for two clients or Web UI plus one agent; expect higher KV memory use.
+- `--parallel 4` or higher: use only for shared servers or concurrent users with plenty of RAM.
+
 Avoid `--tools all` unless every client that can reach the server is fully trusted.
 
 ### Safety checks

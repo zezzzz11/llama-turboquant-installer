@@ -1001,6 +1001,9 @@ gpu_layers_default() {
 
 show_extra_arg_suggestions() {
     info "Optional llama-server arg suggestions; press Enter to skip or paste/edit one:"
+    hint "Parallel 1:     single-agent / lowest memory / best per-request consistency"
+    hint "Parallel 2:     two clients or UI + agent; higher KV memory use"
+    hint "Parallel 4+:    shared server / concurrent users; only with plenty of RAM"
     hint "Agent API:      --parallel 1 --cache-reuse 256 --timeout 1200 --alias local-agent --no-webui"
     hint "Reasoning cap:  --parallel 1 --cache-reuse 256 --reasoning-budget 1024 --timeout 1200 --alias local-agent --no-webui"
     hint "Lower RAM:      --parallel 1 --cache-ram 4096 --no-webui"
