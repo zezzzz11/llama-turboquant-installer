@@ -89,7 +89,7 @@ You can still pass any GGUF repository explicitly with `--model owner/repo`.
 
 ### Context size and auto-tuning
 
-The floor is 65 536 tokens across all use cases — enough for modern agentic workloads. After download the installer reads the GGUF's native context length from the file's metadata header; if it's larger than your requested context, **the native value is used instead**. Qwen3.5 reports 256k, Llama 3.1 reports 128k, etc.
+The default context is 65 536 tokens across all use cases — enough for most agentic workloads without allocating a model's full native maximum. After download the installer reads the GGUF's native context length from the file's metadata header, but your requested `--context` remains the cap. For example, a 262k-native model still runs at `--context 65536` unless you explicitly request more.
 
 KV cache memory is then estimated as:
 
@@ -104,6 +104,8 @@ On Metal and CUDA backends, `--flash-attn` is also added automatically — large
 `--jinja` is added on all backends so the model's built-in chat template (from the GGUF) is used. This is required for tool calls to be parsed correctly with modern instruct and agent models (Qwen, Hermes, Gemma, Llama 3.1+, etc.).
 
 Model weights are loaded via mmap (llama.cpp's default), so the OS pages them in from disk on demand. You can keep large models around without burning RAM up front.
+
+On Apple Silicon, the launcher defaults generation/prompt-processing threads to the Performance-core count when macOS reports it, avoiding Efficiency-core synchronization slowdowns. Build jobs can still use the full physical core count.
 
 ### Idle behavior
 

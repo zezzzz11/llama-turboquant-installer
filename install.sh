@@ -295,12 +295,16 @@ detect_platform() {
     if [[ "$OS" == macos ]]; then
         MEM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
         PHYS_CORES="$(sysctl -n hw.physicalcpu 2>/dev/null || echo 2)"
+        RUN_THREADS="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo "$PHYS_CORES")"
     else
         local kb
         kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
         MEM_GB=$(( kb / 1024 / 1024 ))
         PHYS_CORES="$(nproc 2>/dev/null || echo 2)"
+        RUN_THREADS="$PHYS_CORES"
     fi
+    [[ "$RUN_THREADS" =~ ^[0-9]+$ ]] || RUN_THREADS="$PHYS_CORES"
+    (( RUN_THREADS >= 1 )) || RUN_THREADS="$PHYS_CORES"
     if (( MEM_GB < 1 )); then
         warn "Could not detect system RAM; assuming 16 GB for recommendations"
         MEM_GB=16
@@ -324,6 +328,7 @@ detect_platform() {
 
     info "OS / arch    : ${C_BOLD}$OS${C_RESET} / ${C_BOLD}$ARCH${C_RESET}"
     info "RAM / cores  : ${C_BOLD}${MEM_GB} GB${C_RESET} / ${C_BOLD}${PHYS_CORES}${C_RESET}"
+    info "Server threads: ${C_BOLD}${RUN_THREADS}${C_RESET}"
     info "GPU backend  : ${C_BGREEN}${GPU_BACKEND}${C_RESET}"
 }
 
@@ -518,8 +523,9 @@ tune_for_model() {
     info "arch=${C_BOLD}${arch:-?}${C_RESET}  native_ctx=${C_BOLD}${native_ctx:-?}${C_RESET}  layers=${layers:-?}  heads=${heads:-?}/${kv_heads}  head_dim=${head_dim:-?}"
 
     if [[ -n "$native_ctx" && "$native_ctx" -gt "$USER_CTX" ]]; then
-        ok "Native context (${native_ctx}) > requested (${USER_CTX}) — using native"
-        USER_CTX="$native_ctx"
+        ok "Native context (${native_ctx}) > requested (${USER_CTX}) — keeping requested cap"
+    elif [[ -n "$native_ctx" && "$USER_CTX" -gt "$native_ctx" ]]; then
+        warn "Requested context (${USER_CTX}) is above native context (${native_ctx}); this may use extra memory or require extrapolation"
     fi
 
     if [[ -n "$layers" && -n "$head_dim" && -n "$kv_heads" && "$kv_heads" -gt 0 ]]; then
@@ -1118,7 +1124,7 @@ write_config() {
         echo "EXTRA_ARGS=\"$EXTRA_ARGS\""
         echo "LLM_PORT=\"$USER_PORT\""
         echo "LLM_CONTEXT=\"$USER_CTX\""
-        echo "LL_THREADS=\"$PHYS_CORES\""
+        echo "LL_THREADS=\"$RUN_THREADS\""
         echo "GPU_BACKEND=\"$GPU_BACKEND\""
         echo "LLAMA_BUILD_DIR=\"${SHARE_DIR}/bin\""
     } > "$CONFIG_FILE"
@@ -1312,6 +1318,7 @@ print_summary() {
 
   ${C_BOLD}Platform${C_RESET}      ${OS}/${ARCH} (${GPU_BACKEND})
   ${C_BOLD}RAM/cores${C_RESET}     ${MEM_GB} GB / ${PHYS_CORES}
+  ${C_BOLD}Threads${C_RESET}       ${RUN_THREADS}
   ${C_BOLD}Binary${C_RESET}        ${LLAMA_SERVER_PATH:-<dry-run>}
   ${C_BOLD}Model${C_RESET}         ${MODEL_GGUF:-<not downloaded>}
   ${C_BOLD}Context${C_RESET}       ${USER_CTX}
