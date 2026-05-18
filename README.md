@@ -89,7 +89,7 @@ You can still pass any GGUF repository explicitly with `--model owner/repo`.
 
 ### Context size and auto-tuning
 
-The default context is 65 536 tokens across all use cases — enough for most agentic workloads without allocating a model's full native maximum. After download the installer reads the GGUF's native context length from the file's metadata header, but your requested `--context` remains the cap. For example, a 262k-native model still runs at `--context 65536` unless you explicitly request more.
+The default context is 65 536 tokens across all use cases — enough for most agentic workloads without allocating a model's full native maximum. After download the installer reads the GGUF's native context length from the file's metadata header and prints it as the model maximum, but your requested `--context` remains the cap. For example, a 262k-native model still runs at `--context 65536` unless you explicitly request `--context 262144`.
 
 KV cache memory is then estimated as:
 

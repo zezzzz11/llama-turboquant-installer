@@ -520,12 +520,12 @@ tune_for_model() {
         head_dim=$(( emb_len / heads ))
     fi
 
-    info "arch=${C_BOLD}${arch:-?}${C_RESET}  native_ctx=${C_BOLD}${native_ctx:-?}${C_RESET}  layers=${layers:-?}  heads=${heads:-?}/${kv_heads}  head_dim=${head_dim:-?}"
+    info "arch=${C_BOLD}${arch:-?}${C_RESET}  model_max_ctx=${C_BOLD}${native_ctx:-?}${C_RESET}  layers=${layers:-?}  heads=${heads:-?}/${kv_heads}  head_dim=${head_dim:-?}"
 
     if [[ -n "$native_ctx" && "$native_ctx" -gt "$USER_CTX" ]]; then
-        ok "Native context (${native_ctx}) > requested (${USER_CTX}) — keeping requested cap"
+        ok "Requested context ${USER_CTX}; model maximum is ${native_ctx}. Use --context ${native_ctx} to set it manually."
     elif [[ -n "$native_ctx" && "$USER_CTX" -gt "$native_ctx" ]]; then
-        warn "Requested context (${USER_CTX}) is above native context (${native_ctx}); this may use extra memory or require extrapolation"
+        warn "Requested context (${USER_CTX}) is above model maximum (${native_ctx}); this may use extra memory or require extrapolation"
     fi
 
     if [[ -n "$layers" && -n "$head_dim" && -n "$kv_heads" && "$kv_heads" -gt 0 ]]; then
