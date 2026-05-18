@@ -993,6 +993,15 @@ gpu_layers_default() {
     [[ "$GPU_BACKEND" == "cpu" ]] && echo 0 || echo 99
 }
 
+show_extra_arg_suggestions() {
+    info "Optional llama-server arg suggestions; press Enter to skip or paste/edit one:"
+    hint "Agent API:      --parallel 1 --cache-reuse 256 --timeout 1200 --alias local-agent --no-webui"
+    hint "Reasoning cap:  --parallel 1 --cache-reuse 256 --reasoning-budget 1024 --timeout 1200 --alias local-agent --no-webui"
+    hint "Lower RAM:      --parallel 1 --cache-ram 4096 --no-webui"
+    hint "LAN access:     --host 0.0.0.0 --api-key <key> --no-webui"
+    warn "Avoid --tools all unless you fully trust every client that can reach this server"
+}
+
 maybe_resume() {
     [[ -f "$CONFIG_FILE" ]] || return 1
     if [[ "$RESUME" -ne 1 ]]; then
@@ -1084,6 +1093,7 @@ run_setup_wizard() {
 
     EXTRA_ARGS="${CLI_EXTRA:-}"
     if [[ -z "$EXTRA_ARGS" && "$ASSUME_YES" -ne 1 ]]; then
+        show_extra_arg_suggestions
         EXTRA_ARGS="$(ask_string "Extra llama-server args" "")"
     fi
     return 0

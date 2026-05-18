@@ -114,6 +114,17 @@ The launcher can reduce idle resource use in two stages:
 
 Use `0` to disable idle shutdown and `-1` to disable llama-server sleep.
 
+### Suggested extra args
+
+The installer shows optional `llama-server` argument presets before the extra-args prompt. These are suggestions only; press Enter to skip them.
+
+- Agent API: `--parallel 1 --cache-reuse 256 --timeout 1200 --alias local-agent --no-webui`
+- Reasoning cap: `--parallel 1 --cache-reuse 256 --reasoning-budget 1024 --timeout 1200 --alias local-agent --no-webui`
+- Lower RAM: `--parallel 1 --cache-ram 4096 --no-webui`
+- LAN access: `--host 0.0.0.0 --api-key <key> --no-webui`
+
+Avoid `--tools all` unless every client that can reach the server is fully trusted.
+
 ### Safety checks
 
 - **Disk space**: before downloading, the installer queries the file size from the Hugging Face tree API and checks `df` — aborts with a clear message if there isn't ~10% headroom.
